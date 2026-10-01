@@ -173,7 +173,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         Set<String> configured = new LinkedHashSet<>();
         for (List<String> group : config.settings().loot().lootGroups()) {
             for (String raw : group) {
-                configured.addAll(cn.mgtown.fmwar.config.LootParser.rawEnchantmentKeys(raw));
+                configured.addAll(cn.mgtown.fmwar.config.LootParser.rawLootEnchantmentKeys(raw));
             }
         }
         configured.addAll(config.settings().start().rodEnchantments().keySet());

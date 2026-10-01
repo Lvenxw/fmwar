@@ -389,7 +389,7 @@ public final class ConfigManager {
             Region arena = parsed.regions().get("arena");
             Region notify = parsed.regions().get("notify");
             if (!missingRequired.contains("regions.arena") && !missingRequired.contains("regions.notify")
-                    && !covers(notify, arena)) {
+                    && !notify.covers(arena)) {
                 problems.add(new Spec.Problem("regions.notify",
                         "未完全覆盖 regions.arena（提示接收范围应当包含整个场地）"));
             }
@@ -418,11 +418,6 @@ public final class ConfigManager {
 
     private boolean sameWorld(Region a, Region b) {
         return a.world().equals(b.world());
-    }
-
-    private boolean covers(Region outer, Region inner) {
-        return outer.minX() <= inner.minX() && outer.minY() <= inner.minY() && outer.minZ() <= inner.minZ()
-                && outer.maxX() >= inner.maxX() && outer.maxY() >= inner.maxY() && outer.maxZ() >= inner.maxZ();
     }
 
     // ------------------------------------------------------------------

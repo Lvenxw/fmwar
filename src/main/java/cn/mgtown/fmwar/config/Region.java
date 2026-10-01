@@ -23,13 +23,27 @@ public record Region(String world, double minX, double minY, double minZ, double
         if (location == null || location.getWorld() == null) {
             return false;
         }
-        if (!location.getWorld().getName().equals(world)) {
+        return contains(location.getWorld().getName(), location.getX(), location.getY(), location.getZ());
+    }
+
+    /**
+     * 纯几何判定：不接触任何 Bukkit 类型。
+     *
+     * <p>抽出这个方法是为了让“区域包含关系”这类核心判定可以被自动化测试直接覆盖——
+     * 它决定了成员资格、存活人数、离场淘汰与提示可见性，是玩法里最不该出错的一条逻辑。</p>
+     */
+    public boolean contains(String worldName, double x, double y, double z) {
+        if (worldName == null || !worldName.equals(world)) {
             return false;
         }
-        double x = location.getX();
-        double y = location.getY();
-        double z = location.getZ();
         return x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ;
+    }
+
+    /** 本区域是否完全包含另一个区域（用于校验提示接收范围覆盖场地）。 */
+    public boolean covers(Region other) {
+        return other != null
+                && minX <= other.minX && minY <= other.minY && minZ <= other.minZ
+                && maxX >= other.maxX && maxY >= other.maxY && maxZ >= other.maxZ;
     }
 
     /** 解析区域所在世界；世界未加载时返回 null。 */

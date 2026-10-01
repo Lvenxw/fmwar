@@ -54,12 +54,17 @@ public final class LootParser {
     }
 
     /**
-     * 静态解析物品定义里出现的附魔键（不做注册表查询、不产生副作用）。
+     * 从**奖励箱物品**定义里静态提取附魔键（不做注册表查询、不产生副作用）。
      *
      * <p>供 /fmwar doctor 在运行期核对"配置里写的键在本服注册表里到底存不存在"——
      * 这是本插件唯一无法在编译期或仓库内验证的外部依赖。</p>
+     *
+     * <p><b>只接受物品格式</b> {@code <材质>:<片段>=<等级>}，例如
+     * {@code MACE:doom_hammer=1,wind_burst=1}。钓竿用的 {@code <键>=<等级>} 格式
+     * （如 {@code minecraft:lure=255}）不要喂给它——那种格式没有材质前缀，
+     * 冒号会被当成材质分隔符。钓竿的键请直接用 {@code start.fishing-rod.enchantments} 的键集。</p>
      */
-    public static List<String> rawEnchantmentKeys(String raw) {
+    public static List<String> rawLootEnchantmentKeys(String raw) {
         List<String> keys = new ArrayList<>();
         if (raw == null || raw.isBlank()) {
             return keys;
