@@ -16,6 +16,18 @@ public final class TimeUtil {
         return String.format("%02d:%02d", minutes, rest);
     }
 
+    /**
+     * 记分板用的剩余时间文本。
+     *
+     * @param rawSeconds true 时直接写秒数（900、899、…），false 时写 {@code mm:ss}
+     */
+    public static String display(long ticks, boolean rawSeconds) {
+        if (rawSeconds) {
+            return Long.toString(Math.max(0L, ticks) / 20L);
+        }
+        return mmss(ticks);
+    }
+
     /** 把剩余 tick 数格式化成秒（向上取整，倒计时显示用）。 */
     public static long ceilSeconds(long ticks) {
         if (ticks <= 0) {

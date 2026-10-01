@@ -11,8 +11,11 @@
 
 config-version: 1
 
-# 全局消息前缀，可用 {prefix} 在任意文案中引用
+# 全局消息前缀。{prefix} 用于「加入/退出队列」这类玩家动向提示，颜色保持不变
 prefix: '&6[附魔战争]&r '
+
+# 玩法提示前缀：{war_prefix} 用于其余全部提示，颜色为 light_purple
+war-prefix: '&d[附魔战争]&r '
 
 # ===========================================================================
 # 区域与传送点
@@ -139,14 +142,11 @@ duel:
 # 开局给予效果（对局开始时执行一次）
 # ===========================================================================
 start:
-  # 清空背包 + 清除药水效果
+  # 开局清空背包（需求：游戏内物品不能带出场地）。
+  # 刻意**不做背包备份**：备份只存在内存里，崩服会连同备份一起丢失，
+  # 反而让玩家的物品不安全。需要保护玩家物品请用专门的背包备份插件。
   clear-inventory: true
   clear-effects: true
-  # 离场/死亡后是否把入场时备份的背包还给玩家。
-  # 默认 true：入场前的物品属于玩家；还原动作会整体覆盖背包，因此**本局在场地内获得的**
-  # 物品（奖励箱装备、绿宝石、钓竿）不会跟着带出去。设为 false 则连入场前的物品也一并丢弃，
-  # 适用于服上另有背包备份机制的情况。
-  restore-on-leave: true
   # 是否在提示接收范围内一并禁止潜行。
   # 默认 false：需求里的“坐下/躺下/趴下”由坐姿插件提供，原版只有潜行可拦，容易误伤。
   block-sneak: false
@@ -223,8 +223,19 @@ teams:
 scoreboard:
   enabled: true
   title: '&6附魔战争'
+  # 剩余时间：默认直接写秒数（900 → 899 → …）；改成 false 则写 mm:ss
+  time-seconds: true
   time-line: '&e剩余时间 &f{time}'
   alive-line: '&e存活人数 &f{alive}'
+  # 积分榜：使用服务器上名为 <main> 的记分板（默认 fmjfb）
+  points-enabled: true
+  points-main: fmjfb
+  points-title: '&6附魔战争积分榜'
+  points-header: '&e玩家 &7| &e积分'
+  # 每行一个名次；{rank} 名次、{player} 玩家名、{points} 积分
+  points-line: '&f{rank}. &a{player} &7- &e{points}'
+  # 最多显示多少行
+  points-rows: 10
 
 # ===========================================================================
 # 提示文案（{player} 会被替换为玩家名，不含前缀部分请自行加 {prefix}）
@@ -240,7 +251,7 @@ messages:
   spectator-already: '{prefix}&7你已经在观战模式中'
   prepare-progress: '{prefix}&e准备中 &f{clicks}&7/&f{required}'
   prepare-need-two: '{prefix}&c准备房间内至少需要两名已入队玩家'
-  prepare-announce: '{prefix}&a准备完成，即将开始游戏'
+  prepare-announce: '{war_prefix}&a准备完成，&f{seconds} &a秒后开始游戏'
   prepare-reset: '{prefix}&c有玩家进入准备房间，准备进度已重置'
   prepare-countdown: '{prefix}&e游戏将在 &f{seconds} &e秒后开始'
   duel-teleport: '{prefix}&c剩余时间不足，已把你传送到决斗圈'
@@ -269,6 +280,11 @@ messages:
   command-usage-status: '&e/{label} status &7- 查看当前状态'
   command-usage-doctor: '&e/{label} doctor &7- 自检配置与 ExtraShop 集成'
   command-usage-button: '&e/{label} button &7- 列出按钮坐标，或进入游戏内校准'
+  command-usage-points: '&e/{label} points &7- 查看附魔战争积分榜（击杀 +1，获胜 +3）'
+  # ---- 积分榜 ----
+  points-title: '{war_prefix}&6附魔战争积分榜（共 &f{count} &6人）：'
+  points-line: '&7{rank}. &a{player} &7- &e{points} &7分'
+  points-empty: '{war_prefix}&7暂无积分记录'
   # ---- 按钮校准 ----
   button-capture-choose: '{prefix}&e请点击下面一个按钮名，然后右键一次目标方块完成校准：'
   button-capture-prompt: '{prefix}&e请在 &f{seconds} &e秒内右键一次目标方块，把它登记为按钮 &f{button}'

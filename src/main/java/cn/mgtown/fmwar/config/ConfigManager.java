@@ -144,7 +144,6 @@ public final class ConfigManager {
         Settings.Start start = new Settings.Start(
                 yaml.getBoolean("start.clear-inventory", true),
                 yaml.getBoolean("start.clear-effects", true),
-                yaml.getBoolean("start.restore-on-leave", true),
                 yaml.getBoolean("start.block-sneak", false),
                 yaml.getBoolean("start.resistance.enabled", true),
                 yaml.getLong("start.resistance.duration-ticks", 100),
@@ -189,8 +188,15 @@ public final class ConfigManager {
         Settings.Scoreboard scoreboard = new Settings.Scoreboard(
                 yaml.getBoolean("scoreboard.enabled", true),
                 yaml.getString("scoreboard.title", "附魔战争"),
+                yaml.getBoolean("scoreboard.time-seconds", true),
                 yaml.getString("scoreboard.time-line", "&e剩余时间 &f{time}"),
-                yaml.getString("scoreboard.alive-line", "&e存活人数 &f{alive}"));
+                yaml.getString("scoreboard.alive-line", "&e存活人数 &f{alive}"),
+                yaml.getBoolean("scoreboard.points-enabled", true),
+                yaml.getString("scoreboard.points-main", "fmjfb"),
+                yaml.getString("scoreboard.points-title", "&6附魔战争积分榜"),
+                yaml.getString("scoreboard.points-header", "&e玩家 &7| &e积分"),
+                yaml.getString("scoreboard.points-line", "&f{rank}. &a{player} &7- &e{points}"),
+                (int) yaml.getLong("scoreboard.points-rows", 10));
 
         Map<String, String> messages = new LinkedHashMap<>();
         ConfigurationSection messageSection = yaml.getConfigurationSection("messages");
@@ -213,6 +219,7 @@ public final class ConfigManager {
 
         return new Settings(
                 yaml.getString("prefix", "&6[附魔战争]&r "),
+                yaml.getString("war-prefix", "&d[附魔战争]&r "),
                 defaultWorld,
                 Map.copyOf(regions),
                 Map.copyOf(locations),

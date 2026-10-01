@@ -11,6 +11,7 @@ import cn.mgtown.fmwar.service.AlertService;
 import cn.mgtown.fmwar.service.ButtonCapture;
 import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.GameScoreboard;
+import cn.mgtown.fmwar.service.PointsService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
 import org.bukkit.command.PluginCommand;
@@ -32,6 +33,7 @@ public final class FMWar extends JavaPlugin {
     private GameScoreboard gameScoreboard;
     private ShopService shopService;
     private ButtonCapture buttonCapture;
+    private PointsService pointsService;
     private GameEngine engine;
 
     @Override
@@ -50,7 +52,9 @@ public final class FMWar extends JavaPlugin {
         teamService = new TeamService(configService);
         gameScoreboard = new GameScoreboard(teamService);
         shopService = new ShopService(this, configService);
-        engine = new GameEngine(this, configService, alertService, teamService, gameScoreboard, shopService);
+        pointsService = new PointsService(this);
+        engine = new GameEngine(this, configService, alertService, teamService,
+                gameScoreboard, shopService, pointsService);
         buttonCapture = new ButtonCapture(configService, alertService);
 
         getServer().getPluginManager().registerEvents(
@@ -61,7 +65,8 @@ public final class FMWar extends JavaPlugin {
                 new ActionGuardListener(configService, alertService), this);
 
         CommandHandler handler = new CommandHandler(
-                this, configService, alertService, engine, teamService, shopService, buttonCapture);
+                this, configService, alertService, engine, teamService, shopService,
+                buttonCapture, pointsService);
         PluginCommand command = getCommand("fmwar");
         if (command != null) {
             command.setExecutor(handler);
@@ -86,6 +91,9 @@ public final class FMWar extends JavaPlugin {
     public void onDisable() {
         if (engine != null) {
             engine.onDisable();
+        }
+        if (pointsService != null) {
+            pointsService.save();
         }
         getLogger().info("附魔战争已停用");
     }

@@ -50,6 +50,52 @@ public final class SafeLocation {
     }
 
     /**
+     * 在**正方形**区域内采样一个满足最小间距、且落在指定区域内的落脚点；找不到返回 null。
+     *
+     * <p>需求 8 要求“以中心点 -1078 -1774 为中心、半径 100 格的正方形分散”，
+     * 因此这里按边长 {@code 2 * halfSize} 的正方形均匀取点，而不是取圆。
+     * 越出 {@code within}（场地）的候选点直接丢弃——否则玩家一落地就被判“离开游戏”。</p>
+     *
+     * @param within 落点必须落在其中（通常传场地）；传 null 表示不限制
+     */
+    public static Location sampleSquare(World world, double centerX, double centerZ,
+                                        double halfSize, double minSpacing, int maxAttempts,
+                                        java.util.List<Location> taken, cn.mgtown.fmwar.config.Region within) {
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            double x = centerX + random.nextDouble(-halfSize, halfSize);
+            double z = centerZ + random.nextDouble(-halfSize, halfSize);
+            if (within != null && !within.contains(world.getName(), x, 0, z)) {
+                continue;
+            }
+            Location candidate = find(world, x, z);
+            if (candidate == null) {
+                continue;
+            }
+            // 地形落差可能让实际落脚点偏出场地边界，落地后再确认一次
+            if (within != null && !within.contains(candidate)) {
+                continue;
+            }
+            boolean tooClose = false;
+            for (Location other : taken) {
+                if (other.getWorld() != candidate.getWorld()) {
+                    continue;
+                }
+                double dx = other.getX() - candidate.getX();
+                double dz = other.getZ() - candidate.getZ();
+                if (Math.sqrt(dx * dx + dz * dz) < minSpacing) {
+                    tooClose = true;
+                    break;
+                }
+            }
+            if (!tooClose) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 在圆形区域内采样一个满足最小间距、且**落在指定区域内**的落脚点；找不到返回 null。
      *
      * @param within 落点必须落在其中（通常传场地）；传 null 表示不限制

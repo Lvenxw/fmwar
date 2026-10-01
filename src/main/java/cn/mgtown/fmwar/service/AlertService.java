@@ -8,6 +8,7 @@ import org.bukkit.entity.Player;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 提示的渲染与投递。
@@ -26,6 +27,25 @@ public final class AlertService {
     /** 占位符 -> 替换值；{@code {prefix}} 会在渲染时自动补上。 */
     public static final String PREFIX = "{prefix}";
 
+    /**
+     * 仍使用原色 {@code {prefix}} 的消息（“玩家动向”提示，颜色保持原样）。
+     *
+     * <p>其余全部消息统一改用 light_purple 的 {@code war-prefix}。
+     * 在渲染层按消息键决定前缀，而不是把几十条文案各改一遍——这样以后新增文案
+     * 默认就是 light_purple，不会再漏。</p>
+     */
+    private static final Set<String> QUEUE_MESSAGES = Set.of(
+            "queue-join",
+            "queue-leave",
+            "queue-joined-self",
+            "queue-left-self",
+            "queue-already-joined");
+
+    /** 判断某条消息该用哪个前缀（返回占位符名）。 */
+    public static boolean usesPlainPrefix(String messageKey) {
+        return QUEUE_MESSAGES.contains(messageKey);
+    }
+
     private final ConfigService config;
 
     public AlertService(ConfigService config) {
@@ -41,7 +61,11 @@ public final class AlertService {
     public String render(String messageKey, Map<String, String> placeholders) {
         Settings settings = config.settings();
         String raw = settings.message(messageKey);
-        String text = raw.replace(PREFIX, settings.prefix() == null ? "" : settings.prefix());
+        String plain = settings.prefix() == null ? "" : settings.prefix();
+        String war = settings.warPrefix() == null ? plain : settings.warPrefix();
+        // “玩家动向”那几条保持原色，其余一律 light_purple
+        String chosen = usesPlainPrefix(messageKey) ? plain : war;
+        String text = raw.replace(PREFIX, chosen).replace("{war_prefix}", chosen);
         if (placeholders != null) {
             for (Map.Entry<String, String> entry : placeholders.entrySet()) {
                 text = text.replace("{" + entry.getKey() + "}", entry.getValue());

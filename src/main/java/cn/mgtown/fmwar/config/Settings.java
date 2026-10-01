@@ -10,6 +10,7 @@ import java.util.Map;
  */
 public record Settings(
         String prefix,
+        String warPrefix,
         String world,
         Map<String, Region> regions,
         Map<String, Position> locations,
@@ -94,9 +95,14 @@ public record Settings(
     public record Duel(double centerX, double centerZ, double radius, double minSpacing, int maxAttempts) {
     }
 
+    /**
+     * 开局设置。
+     *
+     * <p>刻意**不提供背包备份开关**：备份只存在于内存里，崩服会连同备份一起丢失，
+     * 反而让玩家物品更不安全。需要保护玩家物品应当用专门的背包备份插件。</p>
+     */
     public record Start(boolean clearInventory,
                         boolean clearEffects,
-                        boolean restoreOnLeave,
                         boolean blockSneak,
                         boolean resistanceEnabled,
                         long resistanceDurationTicks,
@@ -117,6 +123,16 @@ public record Settings(
     public record Teams(String player, String spectator) {
     }
 
-    public record Scoreboard(boolean enabled, String title, String timeLine, String aliveLine) {
+    public record Scoreboard(boolean enabled,
+                             String title,
+                             boolean timeSeconds,
+                             String timeLine,
+                             String aliveLine,
+                             boolean pointsEnabled,
+                             String pointsMain,
+                             String pointsTitle,
+                             String pointsHeader,
+                             String pointsLine,
+                             int pointsRows) {
     }
 }

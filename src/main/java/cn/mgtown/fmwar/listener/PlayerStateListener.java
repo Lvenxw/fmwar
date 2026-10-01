@@ -5,6 +5,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -37,15 +38,40 @@ public final class PlayerStateListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDeath(PlayerDeathEvent event) {
         Player player = event.getEntity();
-        if (!engine.isActive() || !engine.isMember(player.getUniqueId())) {
-            return;
-        }
         // 需求：死亡玩家的背包要被清空。原版死亡会先把物品掉在场地里，
-        // 物品本身不再落地（避免与“游戏内物品不能带出游戏场地”冲突），
-        // 只有“入场前备份的背包”会在离场时还给玩家。
+        // 因此先清空掉落，再交给引擎做淘汰与计分。
         event.getDrops().clear();
         event.setDroppedExp(0);
-        engine.eliminate(player, "death", true, true);
+        engine.onPlayerDeath(player);
+    }
+
+    /** 记录最后一名对玩家造成伤害的人：死亡时据此记击杀分（含弹射物伤害）。 */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDamage(EntityDamageByEntityEvent event) {
+        if (!(event.getEntity() instanceof Player victim)) {
+            return;
+        }
+        Player damager = resolveDamager(event.getDamager());
+        if (damager == null) {
+            return;
+        }
+        engine.recordDamager(victim.getUniqueId(), damager.getUniqueId());
+    }
+
+    /** 把弹射物 / 驯服生物的主人解析成实际造成伤害的玩家。 */
+    private Player resolveDamager(org.bukkit.entity.Entity entity) {
+        if (entity instanceof Player player) {
+            return player;
+        }
+        if (entity instanceof org.bukkit.entity.Projectile projectile
+                && projectile.getShooter() instanceof Player shooter) {
+            return shooter;
+        }
+        if (entity instanceof org.bukkit.entity.Tameable tameable
+                && tameable.getOwner() instanceof Player owner) {
+            return owner;
+        }
+        return null;
     }
 
     /**

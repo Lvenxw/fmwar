@@ -33,11 +33,14 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import cn.mgtown.fmwar.config.Position;
 import cn.mgtown.fmwar.config.Region;
+import cn.mgtown.fmwar.service.PointsService;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.block.Chest;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
 
 /**
  * 对局引擎：唯一的状态机 + 唯一的 20tick 主循环。
@@ -48,11 +51,15 @@ import org.bukkit.enchantments.Enchantment;
  */
 public final class GameEngine {
 
-    /** 每个玩家在入场时的背包快照，用于“死亡/离场后恢复原背包”（可配置）。 */
-    private final Map<UUID, ItemStack[]> inventoryBackups = new HashMap<>();
-
     /** 准备的游戏世界。 */
     private World world;
+
+    /**
+     * 自定义铁砧（customanvil 插件）的记分板标签。
+     *
+     * <p>清场时必须排除这些实体：它们是场地里的常驻设施，不属于“对局残留物”。</p>
+     */
+    private static final String ANVIL_TAG = "customanvil";
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -60,6 +67,10 @@ public final class GameEngine {
     private final TeamService teams;
     private final GameScoreboard scoreboard;
     private final ShopService shops;
+    private final PointsService points;
+
+    /** 受害者 -> 最后一名对其造成伤害的玩家：死亡时据此记击杀分。 */
+    private final Map<UUID, UUID> lastDamager = new HashMap<>();
 
     /** 当前阶段。 */
     private GamePhase phase = GamePhase.IDLE;
@@ -115,8 +126,6 @@ public final class GameEngine {
      * 于是“对局中掉线、结束后才上线”的玩家所有分支都落空，直接以登出坐标留在场地内。</p>
      */
     private final Set<UUID> pendingHall = new HashSet<>();
-    /** 掉线玩家的入场背包快照：离线期间写背包会被服务端覆盖，留到上线时再写回。 */
-    private final Map<UUID, ItemStack[]> disconnectedInventory = new HashMap<>();
 
     /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
     private boolean ended;
@@ -124,13 +133,27 @@ public final class GameEngine {
     private BukkitTask tickTask;
 
     public GameEngine(FMWar plugin, ConfigService config, AlertService alerts,
-                      TeamService teams, GameScoreboard scoreboard, ShopService shops) {
+                      TeamService teams, GameScoreboard scoreboard, ShopService shops,
+                      PointsService points) {
         this.plugin = plugin;
         this.config = config;
         this.alerts = alerts;
         this.teams = teams;
         this.scoreboard = scoreboard;
         this.shops = shops;
+        this.points = points;
+    }
+
+    /** 供伤害监听上报“谁打了谁”，死亡时据此记击杀分。 */
+    public void recordDamager(UUID victim, UUID damager) {
+        if (victim == null || damager == null || victim.equals(damager)) {
+            return;
+        }
+        // 只记录参战者之间的伤害：旁观者/局外玩家不该被计分
+        if (!members.contains(victim) || !members.contains(damager)) {
+            return;
+        }
+        lastDamager.put(victim, damager);
     }
 
     // ------------------------------------------------------------------
@@ -181,13 +204,16 @@ public final class GameEngine {
         return ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
     }
 
-    /** 插件停用：强制结算并清场，运行期状态不落盘。 */
+    /** 插件停用：强制结算并清场。 */
     public void onDisable() {
         if (tickTask != null) {
             tickTask.cancel();
             tickTask = null;
         }
         forceCleanup();
+        // 注销积分榜目标，避免在主计分板上留下一个空目标
+        scoreboard.detachPoints(config.settings().scoreboard().pointsMain());
+        points.save();
     }
 
     /** /fmwar reload 之后重新解析世界引用并重跑区块预加载。 */
@@ -278,9 +304,14 @@ public final class GameEngine {
         // 否则同一 tick 会把名单遍历三遍
         int alive = aliveCount();
 
-        // 1) 记分板（剩余时间 + 存活人数）
+        // 1) 记分板：剩余时间（默认直接写秒数）+ 存活人数
         if (settings.scoreboard().enabled()) {
-            scoreboard.update(settings, TimeUtil.mmss(remainingTicks), Integer.toString(alive));
+            scoreboard.update(settings, TimeUtil.display(remainingTicks, settings.scoreboard().timeSeconds()),
+                    Integer.toString(alive));
+            // 积分榜：每秒刷新一次即可，不必每 tick 重建条目
+            if (elapsedTicks % 20L == 0L) {
+                scoreboard.updatePoints(settings, points.ranking());
+            }
         }
 
         // 2) 剩 N 秒时把场内玩家集中到决斗圈
@@ -429,12 +460,20 @@ public final class GameEngine {
     /** 右键准备按钮。 */
     public void prepareClick(Player player) {
         Settings settings = config.settings();
+        // 倒计时已经开始后不再接受点击：否则每点一下都会把倒计时重建一次
+        //（表现为“进度涨到 35/7 却永远不开始”）
+        if (timer != null) {
+            alerts.sendActionBarTo(player, "prepare-countdown",
+                    Map.of("seconds", Long.toString(TimeUtil.ceilSeconds(timer.remainingTicks(Bukkit.getCurrentTick())))));
+            return;
+        }
         if (!canStart()) {
             alerts.sendActionBarTo(player, "prepare-need-two", Map.of());
             return;
         }
-        prepareClicks++;
         long required = settings.timing().prepareClicks();
+        // 计数上限就是目标次数，绝不越过（避免出现 35/7 这类读数）
+        prepareClicks = (int) Math.min(required, prepareClicks + 1L);
         alerts.sendActionBarTo(player, "prepare-progress", Map.of(
                 "clicks", Integer.toString(prepareClicks),
                 "required", Long.toString(required)));
@@ -446,7 +485,10 @@ public final class GameEngine {
             // 若不刷新，引擎 tick 里的 syncPrepRoster 会把“原本就在房间里的人”当成新进入者，
             // 于是刚点满的进度立刻被清零、倒计时当 tick 就被取消
             prepRoster = playersInRegion(settings.region("prep-room"));
-            alerts.broadcast("prepare-announce", Map.of());
+            alerts.broadcast("prepare-announce",
+                    Map.of("seconds", Long.toString(settings.timing().prepareCountdownSeconds())));
+            plugin.getLogger().info("准备完成（" + prepareClicks + "/" + required + "），"
+                    + settings.timing().prepareCountdownSeconds() + " 秒后开始对局");
         }
     }
 
@@ -605,12 +647,19 @@ public final class GameEngine {
         alerts.broadcast("game-start", Map.of());
     }
 
-    /** 开局前：清空背包与药水效果（需求：无法带出/带入）。 */
+    /**
+     * 开局前：切回生存模式、清空背包与药水效果（需求：游戏内物品不能带出场地）。
+     *
+     * <p>刻意**不做背包备份**：备份只存在于内存里，崩服会连同备份一起丢失，
+     * 反而让玩家物品更不安全。需要保护玩家物品请用专门的背包备份插件。</p>
+     */
     private void applyStartState(Player player) {
         Settings settings = config.settings();
+        // 需求：开局把场内玩家（队伍 fm）改成生存模式
+        player.setGameMode(GameMode.SURVIVAL);
         if (settings.start().clearInventory()) {
-            inventoryBackups.put(player.getUniqueId(), player.getInventory().getContents().clone());
             player.getInventory().clear();
+            player.setItemOnCursor(null);
         }
         if (settings.start().clearEffects()) {
             for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
@@ -690,7 +739,7 @@ public final class GameEngine {
         for (int index = 0; index < participants.size(); index++) {
             final Player player = participants.get(index);
             final int slot = index;
-            Location sample = SafeLocation.sample(world, disperse.centerX(), disperse.centerZ(),
+            Location sample = SafeLocation.sampleSquare(world, disperse.centerX(), disperse.centerZ(),
                     disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken, arena);
             if (sample != null) {
                 taken.add(sample);
@@ -701,7 +750,7 @@ public final class GameEngine {
             int chunkX = (int) Math.floor(disperse.centerX()) >> 4;
             int chunkZ = (int) Math.floor(disperse.centerZ()) >> 4;
             world.getChunkAtAsync(chunkX, chunkZ).thenAccept(chunk -> Bukkit.getScheduler().runTask(plugin, () -> {
-                Location retry = SafeLocation.sample(world, disperse.centerX(), disperse.centerZ(),
+                Location retry = SafeLocation.sampleSquare(world, disperse.centerX(), disperse.centerZ(),
                         disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken, arena);
                 if (retry != null) {
                     taken.add(retry);
@@ -918,28 +967,6 @@ public final class GameEngine {
     }
 
     /**
-     * 把玩家的入场背包备份从 {@code inventoryBackups} 挪到 {@code disconnectedInventory}。
-     *
-     * <p>离线期间写入背包会被服务端在保存玩家数据时覆盖，所以掉线时只做转移，
-     * 等玩家上线后再写回。</p>
-     */
-    private void takeInventoryBackup(Player player) {
-        ItemStack[] backup = inventoryBackups.remove(player.getUniqueId());
-        if (backup != null) {
-            disconnectedInventory.put(player.getUniqueId(), backup);
-        }
-    }
-
-    /** 上线时把掉线前扣留的入场背包写回。 */
-    private void restoreInventoryBackup(Player player) {
-        ItemStack[] backup = disconnectedInventory.remove(player.getUniqueId());
-        if (backup != null) {
-            player.getInventory().setContents(backup);
-            player.updateInventory();
-        }
-    }
-
-    /**
      * 该玩家是否正处于“被本插件淘汰、等待主动重生”的窗口内。
      *
      * <p>只有窗口内的玩家才会被 {@code PlayerStateListener} 改写重生点——
@@ -971,6 +998,12 @@ public final class GameEngine {
         });
     }
 
+    /**
+     * 离场/淘汰时清空玩家状态。
+     *
+     * <p>不做任何背包还原：本插件不保留入场备份（内存备份在崩服时会丢失，
+     * 反而让玩家物品更不安全）。需要保护玩家原有物品请用专门的背包备份插件。</p>
+     */
     private void clearPlayerState(Player player) {
         Settings settings = config.settings();
         if (settings.start().clearInventory()) {
@@ -982,25 +1015,7 @@ public final class GameEngine {
                 player.removePotionEffect(effect.getType());
             }
         }
-        restoreInventory(player);
         player.updateInventory();
-    }
-
-    /**
-     * 可选：把入场时备份的背包还给玩家。
-     *
-     * <p>默认开启；还原动作本身就会覆盖掉场地内拾取的物品，因此顺序是先清空再还原。
-     * 不开启时（{@code start.restore-on-leave=false}）玩家入场前的物品会被丢弃——
-     * 这是为了“游戏内物品不能带出场地”这条硬约束，请按服上是否另有背包备份机制来选择。</p>
-     */
-    private void restoreInventory(Player player) {
-        if (!config.settings().start().restoreOnLeave()) {
-            return;
-        }
-        ItemStack[] backup = inventoryBackups.remove(player.getUniqueId());
-        if (backup != null) {
-            player.getInventory().setContents(backup);
-        }
     }
 
     /** 观战玩家离场：回大厅 + 生存模式 + 移出队伍。 */
@@ -1053,8 +1068,6 @@ public final class GameEngine {
             }
             teams.leaveAll(uuid);
             scoreboard.detach(player);
-            // 吞下背包备份：玩家上线时由 onJoin 写回（离线期间写 inventory 会被服务端覆盖）
-            takeInventoryBackup(player);
             alerts.broadcast("quit", Map.of("player", player.getName()));
             if (phase == GamePhase.RUNNING && !ended) {
                 checkVictory();
@@ -1106,7 +1119,6 @@ public final class GameEngine {
                 scoreboard.detach(player);
                 teleport(player, config.settings().location("hall-spawn"));
             }
-            restoreInventoryBackup(player);
             return;
         }
 
@@ -1117,7 +1129,6 @@ public final class GameEngine {
             teams.leaveAll(uuid);
             scoreboard.detach(player);
             teleport(player, config.settings().location("hall-spawn"));
-            restoreInventoryBackup(player);
             alerts.sendTo(player, "player-arena-exit", Map.of("player", player.getName()));
             return;
         }
@@ -1182,8 +1193,7 @@ public final class GameEngine {
     }
 
     /** 只剩一名玩家则胜利；一名不剩则无人生还。挂起 1 tick，避开死亡结算中的中间态。 */
-    private void checkVictory() {
-        if (phase != GamePhase.RUNNING || ended) {
+    private void checkVictory() {        if (phase != GamePhase.RUNNING || ended) {
             return;
         }
         Bukkit.getScheduler().runTask(plugin, () -> {
@@ -1196,6 +1206,10 @@ public final class GameEngine {
             if (alive.size() == 1) {
                 Player winner = alive.get(0);
                 ended = true;
+                // 需求：获得最终胜利 +3 分
+                points.remember(winner.getUniqueId(), winner.getName());
+                points.addWin(winner.getUniqueId());
+                points.save();
                 alerts.broadcast("win", Map.of("player", winner.getName()));
                 eliminate(winner, null, false);
                 endGame();
@@ -1210,6 +1224,30 @@ public final class GameEngine {
     // ------------------------------------------------------------------
     // 结束与清场
     // ------------------------------------------------------------------
+
+    /**
+     * 参战者死亡：按最后伤害来源记击杀分（+1），并完成淘汰流程。
+     *
+     * <p>由 {@code PlayerStateListener} 在装备掉落已清空之后调用。</p>
+     *
+     * @return 是否确实处理了这次死亡（不在名单里的玩家返回 false）
+     */
+    public boolean onPlayerDeath(Player player) {
+        if (phase != GamePhase.RUNNING || ended || !members.contains(player.getUniqueId())) {
+            return false;
+        }
+        UUID killer = lastDamager.remove(player.getUniqueId());
+        eliminate(player, "death", true, true);
+        if (killer != null && !killer.equals(player.getUniqueId())) {
+            Player killerPlayer = Bukkit.getPlayer(killer);
+            if (killerPlayer != null) {
+                points.remember(killer, killerPlayer.getName());
+            }
+            points.addKill(killer);
+            points.save();
+        }
+        return true;
+    }
 
     /**
      * 请求中止对局：走正常结算路径（ENDED → 下一 tick 清场），因此会广播游戏结束，
@@ -1245,6 +1283,8 @@ public final class GameEngine {
         scoreboard.detachAll();
         sendPendingHallToLobby();
         resetRuntimeState();
+        // 对局结束：积分写盘（一局里分数变动频繁，不必每次加分都落盘）
+        points.save();
         alerts.broadcast("game-over", Map.of());
     }
 
@@ -1288,7 +1328,6 @@ public final class GameEngine {
             teams.leaveAll(uuid);
             scoreboard.detach(player);
             teleport(player, config.settings().locationOrNull("hall-spawn"));
-            restoreInventoryBackup(player);
         }
     }
 
@@ -1296,7 +1335,7 @@ public final class GameEngine {
      * 清空全部运行期状态。
      *
      * <p>两条清理路径（正常结算 {@code finishGame} 与停用兜底 {@code forceCleanup}）
-     * 共用一份实现，避免漏清某个集合——此前的“漏清冷却表 / 漏清背包快照”正是这么来的。</p>
+     * 共用一份实现，避免漏清某个集合——此前的“漏清冷却表”正是这么来的。</p>
      */
     private void resetRuntimeState() {
         members.clear();
@@ -1307,7 +1346,7 @@ public final class GameEngine {
         recentEliminations.clear();
         pendingRespawn.clear();
         disconnectedSpectators.clear();
-        inventoryBackups.clear();
+        lastDamager.clear();
         chests.clear();
         prepareClicks = 0;
         duelTeleported = false;
@@ -1318,7 +1357,7 @@ public final class GameEngine {
         timer = null;
         ended = false;
         phase = GamePhase.IDLE;
-        // 刻意不清 pendingHall / disconnectedInventory：它们描述的是“离线玩家下次上线怎么处理”，
+        // 刻意不清 pendingHall：它描述的是“离线玩家下次上线怎么处理”，
         // 生命周期跨越对局边界。若在这里清空，对局中掉线、结束后才上线的玩家会失去标记，
         // 直接以登出坐标留在场地里（需求 108 / 39 落空）。
     }
@@ -1335,6 +1374,16 @@ public final class GameEngine {
      * <p>需求 118：“清空游戏场地范围内所有实体（不包括玩家，此时玩家应全部离开场地范围）”。
      * 只删自己放的奖励箱是不够的——掉落物、射出的箭、投掷物、载具都要一并清理。</p>
      */
+    /**
+     * 清空场地范围内所有实体（不含玩家，也不含自定义铁砧）。
+     *
+     * <p>需求 118：“清空游戏场地范围内所有实体（不包括玩家，此时玩家应全部离开场地范围）”。
+     * 只有奖励箱、掉落物、箭矢、载具等都要一并清理。</p>
+     *
+     * <p><b>自定义铁砧（插件 customanvil）必须排除</b>：它是场地里的常驻设施，
+     * 属于玩家自己摆放的功能性实体，清掉会破坏场地布置。这里同时检查记分板标签与
+     * PersistentDataContainer 两种标记方式，覆盖它的 Interaction 与 BlockDisplay 实体。</p>
+     */
     private void clearArenaEntities() {
         Region arena = config.settings().optionalRegion("arena");
         if (arena == null) {
@@ -1344,14 +1393,28 @@ public final class GameEngine {
         if (target == null) {
             return;
         }
-        for (org.bukkit.entity.Entity entity : target.getEntities()) {
+        // 先取快照再删除：直接在 getEntities() 的返回集合上移除会有并发修改问题
+        for (org.bukkit.entity.Entity entity : new ArrayList<>(target.getEntities())) {
             if (entity instanceof Player) {
+                continue;
+            }
+            if (isCustomAnvilEntity(entity)) {
                 continue;
             }
             if (arena.contains(entity.getLocation())) {
                 entity.remove();
             }
         }
+    }
+
+    /** 判定实体是否属于 customanvil 插件的自定义铁砧（标签或 PDC 任一命中即算）。 */
+    private boolean isCustomAnvilEntity(org.bukkit.entity.Entity entity) {
+        if (entity.getScoreboardTags().contains(ANVIL_TAG)) {
+            return true;
+        }
+        PersistentDataContainer container = entity.getPersistentDataContainer();
+        return container.has(new NamespacedKey("customanvil", "anvil_entity"), PersistentDataType.BYTE)
+                || container.has(new NamespacedKey("customanvil", "anvil_partner"), PersistentDataType.STRING);
     }
 
     /** 强制中止（/fmwar stop）。 */

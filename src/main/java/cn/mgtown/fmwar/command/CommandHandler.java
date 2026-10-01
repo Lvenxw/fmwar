@@ -6,6 +6,7 @@ import cn.mgtown.fmwar.game.GamePhase;
 import cn.mgtown.fmwar.service.AlertService;
 import cn.mgtown.fmwar.service.ButtonCapture;
 import cn.mgtown.fmwar.service.ConfigService;
+import cn.mgtown.fmwar.service.PointsService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
 import cn.mgtown.fmwar.util.TimeUtil;
@@ -34,7 +35,7 @@ import java.util.Set;
 public final class CommandHandler implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS =
-            List.of("reload", "start", "stop", "status", "doctor", "button");
+            List.of("reload", "start", "stop", "status", "doctor", "button", "points");
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -43,10 +44,11 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
     private final TeamService teams;
     private final ShopService shops;
     private final ButtonCapture buttonCapture;
+    private final PointsService points;
 
     public CommandHandler(FMWar plugin, ConfigService config, AlertService alerts,
                           GameEngine engine, TeamService teams, ShopService shops,
-                          ButtonCapture buttonCapture) {
+                          ButtonCapture buttonCapture, PointsService points) {
         this.plugin = plugin;
         this.config = config;
         this.alerts = alerts;
@@ -54,6 +56,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         this.teams = teams;
         this.shops = shops;
         this.buttonCapture = buttonCapture;
+        this.points = points;
     }
 
     @Override
@@ -73,9 +76,30 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "status" -> status(sender);
             case "doctor" -> doctor(sender, label);
             case "button" -> button(sender, args);
+            case "points" -> points(sender);
             default -> usage(sender, label);
         }
         return true;
+    }
+
+    /** {@code /fmwar points} —— 打印附魔战争积分榜。 */
+    private void points(CommandSender sender) {
+        var ranking = points.ranking();
+        line(sender, "points-title", Map.of("count", Integer.toString(ranking.size())));
+        if (ranking.isEmpty()) {
+            line(sender, "points-empty", Map.of());
+            return;
+        }
+        int shown = 0;
+        for (var entry : ranking) {
+            if (++shown > 10) {
+                break;
+            }
+            line(sender, "points-line", Map.of(
+                    "rank", Integer.toString(shown),
+                    "player", entry.name(),
+                    "points", Integer.toString(entry.points())));
+        }
     }
 
     /**
@@ -197,7 +221,8 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         line(sender, "status-alive", Map.of("count", Integer.toString(engine.aliveCount())));
         line(sender, "status-teams", Map.of("teams", teams.describe()));
         if (engine.phase() != GamePhase.IDLE) {
-            line(sender, "status-remaining", Map.of("time", TimeUtil.mmss(engine.remainingTicks())));
+            line(sender, "status-remaining", Map.of("time", TimeUtil.display(
+                    engine.remainingTicks(), config.settings().scoreboard().timeSeconds())));
         }
         if (sender instanceof Player player) {
             String team = teams.inPlayerTeam(player.getUniqueId()) ? config.settings().teams().player()
