@@ -91,6 +91,9 @@ public final class GameEngine {
     /** 把无关玩家送出场地后的冷却（tick），防止传送被取消时每 tick 反复重传。 */
     private final Map<UUID, Long> outsiderCooldown = new HashMap<>();
     private static final long OUTSIDER_COOLDOWN_TICKS = 100L;
+    /** 无关玩家上一次收到“不能进入场地”提示的 tick；避免重传时反复刷屏。 */
+    private final Map<UUID, Long> outsiderNotice = new HashMap<>();
+    private static final long OUTSIDER_NOTICE_INTERVAL_TICKS = 200L;
 
     /** 被本插件淘汰、等待主动重生的玩家：只有这些人的重生点会被改写为大厅。 */
     private final Set<UUID> pendingRespawn = new HashSet<>();
@@ -804,9 +807,14 @@ public final class GameEngine {
             if (until != null && now < until) {
                 continue;
             }
+            // 提示与传送冷却解耦：冷却只限制传送频率，不该让玩家在场地里滞留却收不到说明
+            Long notifiedAt = outsiderNotice.get(uuid);
+            if (notifiedAt == null || now - notifiedAt >= OUTSIDER_NOTICE_INTERVAL_TICKS) {
+                outsiderNotice.put(uuid, now);
+                alerts.sendTo(player, "arena-forbidden", Map.of());
+            }
             outsiderCooldown.put(uuid, now + OUTSIDER_COOLDOWN_TICKS);
             teleport(player, settings.location("hall-spawn"));
-            alerts.sendTo(player, "arena-forbidden", Map.of());
         }
     }
 
@@ -870,13 +878,16 @@ public final class GameEngine {
      */
     private void scheduleRespawn(Player player) {
         Bukkit.getScheduler().runTask(plugin, () -> {
-            pendingRespawn.remove(player.getUniqueId());
             if (!player.isOnline()) {
+                pendingRespawn.remove(player.getUniqueId());
                 return;
             }
             if (player.isDead()) {
+                // 必须在 respawn() **之前**保留待重生标记：PlayerRespawnEvent 正是在
+                // respawn() 内部同步触发的，标记若先被清掉，监听就不会把落点改成大厅
                 player.spigot().respawn();
             }
+            pendingRespawn.remove(player.getUniqueId());
             teleport(player, config.settings().locationOrNull("hall-spawn"), true);
         });
     }
@@ -1161,6 +1172,7 @@ public final class GameEngine {
         queue.clear();
         prepRoster = Set.of();
         outsiderCooldown.clear();
+        outsiderNotice.clear();
         recentEliminations.clear();
         pendingRespawn.clear();
         disconnectedMembers.clear();
