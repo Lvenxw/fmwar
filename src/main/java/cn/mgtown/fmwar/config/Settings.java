@@ -88,11 +88,26 @@ public record Settings(
                          double overtimeDamage) {
     }
 
-    public record Disperse(boolean enabled, double centerX, double centerZ, double radius,
-                           double minSpacing, int maxAttempts) {
+    /**
+     * 开局分散。
+     *
+     * @param centerX    场地中心 X
+     * @param centerY    中心 Y；仅作为“最高可落脚点”搜索的参考高度，可省略（配置里不写 y 时为 0）
+     * @param centerZ    场地中心 Z
+     * @param radius     正方形分散的半边长（格）
+     * @param minSpacing 玩家之间的最小间距（格）
+     */
+    public record Disperse(boolean enabled, double centerX, double centerY, double centerZ,
+                           double radius, double minSpacing, int maxAttempts) {
     }
 
-    public record Duel(double centerX, double centerZ, double radius, double minSpacing, int maxAttempts) {
+    /**
+     * 决斗圈。
+     *
+     * @param centerY 中心 Y；仅作参考高度，可省略
+     */
+    public record Duel(double centerX, double centerY, double centerZ,
+                       double radius, double minSpacing, int maxAttempts) {
     }
 
     /**

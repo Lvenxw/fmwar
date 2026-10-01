@@ -735,12 +735,16 @@ public final class GameEngine {
             }
             return;
         }
+        // center 的 y 作为“最高可落脚点”的搜索参考高度；配置里省略 y 时传 0，
+        // 此时 SafeLocation 会自行从世界最高点向下找，行为与之前一致
+        double referenceY = disperse.centerY();
         List<Location> taken = new ArrayList<>();
         for (int index = 0; index < participants.size(); index++) {
             final Player player = participants.get(index);
             final int slot = index;
             Location sample = SafeLocation.sampleSquare(world, disperse.centerX(), disperse.centerZ(),
-                    disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken, arena);
+                    disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(),
+                    taken, arena, referenceY);
             if (sample != null) {
                 taken.add(sample);
                 teleport(player, sample);
@@ -751,7 +755,8 @@ public final class GameEngine {
             int chunkZ = (int) Math.floor(disperse.centerZ()) >> 4;
             world.getChunkAtAsync(chunkX, chunkZ).thenAccept(chunk -> Bukkit.getScheduler().runTask(plugin, () -> {
                 Location retry = SafeLocation.sampleSquare(world, disperse.centerX(), disperse.centerZ(),
-                        disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken, arena);
+                        disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(),
+                        taken, arena, referenceY);
                 if (retry != null) {
                     taken.add(retry);
                     teleport(player, retry);
@@ -775,8 +780,7 @@ public final class GameEngine {
         List<Location> taken = new ArrayList<>();
         for (Player player : onlineMembers()) {
             Location sample = SafeLocation.sample(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena);
-            if (sample == null) {
+                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena);            if (sample == null) {
                 teleport(player, settings.location("arena-spawn"));
                 continue;
             }

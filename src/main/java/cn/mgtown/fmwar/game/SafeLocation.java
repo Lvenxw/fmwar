@@ -25,12 +25,25 @@ public final class SafeLocation {
 
     /** 在给定 x/z 上寻找最高可落脚点；失败返回 null。 */
     public static Location find(World world, double x, double z) {
+        return find(world, x, z, 0.0);
+    }
+
+    /**
+     * 在给定 x/z 上寻找最高可落脚点；失败返回 null。
+     *
+     * @param referenceY 搜索参考高度：&gt; 0 时从该高度向下找（配置里 center 的 y 就用于此），
+     *                   &lt;= 0 时改从世界最高点向下找。两种方式都只影响搜索**起点**，
+     *                   结果仍是该 x/z 上最高的可落脚面，因此省略 y 不会改变落点。
+     */
+    public static Location find(World world, double x, double z, double referenceY) {
         if (world == null) {
             return null;
         }
         int blockX = (int) Math.floor(x);
         int blockZ = (int) Math.floor(z);
-        int startY = Math.min(world.getMaxHeight() - 2, world.getHighestBlockYAt(blockX, blockZ) + 1);
+        int startY = referenceY > 0
+                ? Math.min(world.getMaxHeight() - 2, (int) Math.floor(referenceY))
+                : Math.min(world.getMaxHeight() - 2, world.getHighestBlockYAt(blockX, blockZ) + 1);
         for (int y = startY; y > world.getMinHeight(); y--) {
             Block ground = world.getBlockAt(blockX, y, blockZ);
             if (ground.isLiquid() || ground.isEmpty()) {
@@ -56,11 +69,13 @@ public final class SafeLocation {
      * 因此这里按边长 {@code 2 * halfSize} 的正方形均匀取点，而不是取圆。
      * 越出 {@code within}（场地）的候选点直接丢弃——否则玩家一落地就被判“离开游戏”。</p>
      *
-     * @param within 落点必须落在其中（通常传场地）；传 null 表示不限制
+     * @param within     落点必须落在其中（通常传场地）；传 null 表示不限制
+     * @param referenceY 落脚点搜索的参考高度（配置 center 的 y）；&lt;= 0 时从世界最高点向下找
      */
     public static Location sampleSquare(World world, double centerX, double centerZ,
                                         double halfSize, double minSpacing, int maxAttempts,
-                                        java.util.List<Location> taken, cn.mgtown.fmwar.config.Region within) {
+                                        java.util.List<Location> taken, cn.mgtown.fmwar.config.Region within,
+                                        double referenceY) {
         ThreadLocalRandom random = ThreadLocalRandom.current();
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             double x = centerX + random.nextDouble(-halfSize, halfSize);
@@ -68,7 +83,7 @@ public final class SafeLocation {
             if (within != null && !within.contains(world.getName(), x, 0, z)) {
                 continue;
             }
-            Location candidate = find(world, x, z);
+            Location candidate = find(world, x, z, referenceY);
             if (candidate == null) {
                 continue;
             }

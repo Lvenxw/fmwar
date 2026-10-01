@@ -125,18 +125,18 @@ public final class ConfigManager {
                 yaml.getLong("timing.emerald-interval", 30),
                 yaml.getDouble("timing.overtime-damage", 2.0));
 
-        // 注意数组下标：center 的配置写法是 [x, z, y]（前两个是平面坐标，第三个可选）
+        // center 是标准 [x, y, z] 坐标。y 允许省略（省略时该位不参与计算）。
         double[] disperseCenter = parseCenter(yaml, "disperse.center", defaultWorld);
         Settings.Disperse disperse = new Settings.Disperse(
                 yaml.getBoolean("disperse.enabled", true),
-                disperseCenter[0], disperseCenter[1],
+                disperseCenter[0], disperseCenter[1], disperseCenter[2],
                 yaml.getDouble("disperse.radius", 100.0),
                 yaml.getDouble("disperse.min-spacing", 25.0),
                 (int) yaml.getLong("disperse.max-attempts", 600));
 
         double[] duelCenter = parseCenter(yaml, "duel.center", defaultWorld);
         Settings.Duel duel = new Settings.Duel(
-                duelCenter[0], duelCenter[1],
+                duelCenter[0], duelCenter[1], duelCenter[2],
                 yaml.getDouble("duel.radius", 40.0),
                 yaml.getDouble("duel.min-spacing", 5.0),
                 (int) yaml.getLong("duel.max-attempts", 300));
@@ -581,13 +581,47 @@ public final class ConfigManager {
     // 基础读取工具
     // ------------------------------------------------------------------
 
+    /**
+     * 解析 center —— **标准 {@code [x, y, z]} 坐标**。
+     *
+     * <p>返回数组固定为 {@code [x, y, z]}。刻意不做任何“某一位其实是 z”的假设：
+     * 早先的实现按下标 {@code [0]}/{@code [1]} 取值并把它当 (x, z) 用，只要配置写法
+     * 与假设不一致（例如写成 {@code [x, y, z]}），z 就会变成一个毫不相干的数字，
+     * 表现为“玩家被传送到场地外、一落地就被判离开游戏”。</p>
+     *
+     * <p>y 允许省略：写成 {@code [x, z]} 时按 (x, y=0, z) 还原，与标准写法等价。</p>
+     *
+     * @return 长度 3 的数组 {@code [x, y, z]}；无法解析时返回 {@code {0,0,0}} 并记录警告
+     */
     private double[] parseCenter(FileConfiguration yaml, String path, String defaultWorld) {
-        double[] center = parseTriple(yaml.get(path));
-        if (center == null) {
-            plugin.getLogger().warning("[config] " + path + " 缺失或格式错误，已退回 0,0");
+        Object raw = yaml.get(path);
+        if (raw instanceof List<?> list) {
+            if (list.size() == 3) {
+                Double x = toDouble(list.get(0));
+                Double y = toDouble(list.get(1));
+                Double z = toDouble(list.get(2));
+                if (x != null && y != null && z != null) {
+                    return new double[]{x, y, z};
+                }
+            } else if (list.size() == 2) {
+                // [x, z] 简写——与标准写法含义一致
+                Double x = toDouble(list.get(0));
+                Double z = toDouble(list.get(1));
+                if (x != null && z != null) {
+                    return new double[]{x, 0.0, z};
+                }
+            }
+            // 明确报错而不是静默按位置猜：坐标搞错的代价是整局玩法失效
+            plugin.getLogger().warning("[config] " + path + " 格式应为 [x, y, z]（或简写 [x, z]），"
+                    + "当前为 " + list + " —— 该中心点将无法正确生效");
             return new double[]{0.0, 0.0, 0.0};
         }
-        return center;
+        double[] triple = parseTriple(raw);
+        if (triple != null) {
+            return triple;
+        }
+        plugin.getLogger().warning("[config] " + path + " 缺失或格式错误，已退回 0,0,0");
+        return new double[]{0.0, 0.0, 0.0};
     }
 
     /** 解析 {@code [x,y,z]} 或 {@code {x:..,y:..,z:..}}；无法解析返回 null。 */
