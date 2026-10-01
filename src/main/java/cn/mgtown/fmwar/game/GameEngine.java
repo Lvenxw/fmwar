@@ -88,6 +88,9 @@ public final class GameEngine {
     private boolean duelTeleported;
     /** 本局生成的奖励箱方块坐标（结束时清理）。 */
     private final List<Location> chests = new ArrayList<>();
+    /** 把无关玩家送出场地后的冷却（tick），防止传送被取消时每 tick 反复重传。 */
+    private final Map<UUID, Long> outsiderCooldown = new HashMap<>();
+    private static final long OUTSIDER_COOLDOWN_TICKS = 100L;
 
     /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
     private boolean ended;
@@ -686,6 +689,7 @@ public final class GameEngine {
             return;
         }
         Region arena = config.settings().region("arena");
+        Settings settings = config.settings();
         for (UUID uuid : new ArrayList<>(members)) {
             Player player = Bukkit.getPlayer(uuid);
             if (player == null) {
@@ -705,10 +709,22 @@ public final class GameEngine {
             if (members.contains(uuid) || teams.inSpectatorTeam(uuid)) {
                 continue;
             }
-            if (arena.contains(player.getLocation())) {
-                teleport(player, config.settings().location("hall-spawn"));
-                alerts.sendTo(player, "arena-forbidden", Map.of());
+            if (!arena.contains(player.getLocation())) {
+                continue;
             }
+            if (settings.region("hall").contains(player.getLocation())
+                    || settings.region("prep-room").contains(player.getLocation())) {
+                continue;
+            }
+            // 冷却 + 目标在受保护区域内：即使某次传送被领地守卫取消，也不会形成每 tick 重传的循环
+            long now = Bukkit.getCurrentTick();
+            Long until = outsiderCooldown.get(uuid);
+            if (until != null && now < until) {
+                continue;
+            }
+            outsiderCooldown.put(uuid, now + OUTSIDER_COOLDOWN_TICKS);
+            teleport(player, settings.location("hall-spawn"));
+            alerts.sendTo(player, "arena-forbidden", Map.of());
         }
     }
 
@@ -984,6 +1000,7 @@ public final class GameEngine {
         scoreboard.detachAll();
         members.clear();
         queue.clear();
+        outsiderCooldown.clear();
         prepareClicks = 0;
         prepRoster = Set.of();
         timer = null;
