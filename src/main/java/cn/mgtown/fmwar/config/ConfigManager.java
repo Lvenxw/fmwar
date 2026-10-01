@@ -44,7 +44,6 @@ public final class ConfigManager {
             "regions.hall.min", "regions.hall.max",
             "regions.duel-1.min", "regions.duel-1.max",
             "locations.arena-spawn.point", "locations.prep-spawn.point", "locations.hall-spawn.point",
-            "buttons.join.block", "buttons.prepare.block", "buttons.back-to-hall.block", "buttons.spectator.block",
             "timing.game-duration", "timing.prepare-clicks",
             "chests.locations", "chests.loot-groups",
             "extra-shops.ids");
@@ -320,16 +319,97 @@ public final class ConfigManager {
                 continue;
             }
             String world = entry.getString("world", defaultWorld);
-            double[] block = parseTriple(entry.get("block"));
-            if (block == null) {
-                plugin.getLogger().warning("[config] buttons." + key + " 缺少 block，已跳过");
+            double radius = entry.getDouble("radius", 2.0);
+            List<Position> positions = parseButtonBlocks(entry, world);
+            if (positions.isEmpty()) {
+                plugin.getLogger().warning("[config] buttons." + key + " 缺少 block/blocks，已跳过");
                 continue;
             }
-            double radius = entry.getDouble("radius", 1.5);
-            buttons.put(key, new Spec.Button(key,
-                    Position.of(world, block[0], block[1], block[2], null, 0.0, 0.0), radius));
+            buttons.put(key, new Spec.Button(key, List.copyOf(positions), radius));
         }
         return buttons;
+    }
+
+    /**
+     * 解析按钮坐标，同时支持单坐标与多坐标写法：
+     * <pre>
+     * block:  [-880, 103, -1711]          # 单方块
+     * block:  { x: -880, y: 103, z: -1711 }
+     * blocks: [[-880, 103, -1711], [-881, 103, -1711]]
+     * </pre>
+     */
+    private List<Position> parseButtonBlocks(ConfigurationSection entry, String world) {
+        List<Position> positions = new ArrayList<>();
+        Object single = entry.get("block");
+        if (single != null) {
+            double[] triple = parseTriple(single);
+            if (triple != null) {
+                positions.add(Position.of(world, triple[0], triple[1], triple[2], null, 0.0, 0.0));
+            }
+        }
+        for (Object raw : entry.getList("blocks", List.of())) {
+            double[] triple = parseTriple(raw);
+            if (triple != null) {
+                positions.add(Position.of(world, triple[0], triple[1], triple[2], null, 0.0, 0.0));
+            }
+        }
+        return positions;
+    }
+
+    // ------------------------------------------------------------------
+    // 按钮就地校准（由 /fmwar button 调用）
+    // ------------------------------------------------------------------
+
+    /**
+     * 把一个方块登记到指定按钮上，并写回 config.yml。
+     *
+     * <p>用途：服务器上按钮的实际方块坐标常常与需求文档的坐标差一两格（按钮贴墙时
+     * {@code PlayerInteractEvent#getClickedBlock()} 返回的是被点中的那一格），
+     * 用指令就地校准比手改 YAML 再 reload 更不容易出错。</p>
+     *
+     * @return 注册成功返回 true；按钮键未知或写入失败返回 false
+     */
+    public boolean appendButtonBlock(String key, String world, int x, int y, int z) {
+        if (settings == null || !settings.buttons().containsKey(key)) {
+            return false;
+        }
+        // 用 loadConfiguration 而不是 loadConfiguration+setDefaults：
+        // 显式读取才能保证 save 时写回的是服主文件里的完整内容，改动最小
+        FileConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+        ConfigurationSection section = yaml.getConfigurationSection("buttons." + key);
+        if (section == null) {
+            section = yaml.createSection("buttons." + key);
+        }
+        List<List<Integer>> blocks = new ArrayList<>();
+        Object existing = section.get("block");
+        if (existing != null) {
+            double[] triple = parseTriple(existing);
+            if (triple != null) {
+                blocks.add(List.of((int) triple[0], (int) triple[1], (int) triple[2]));
+            }
+        }
+        for (Object raw : section.getList("blocks", List.of())) {
+            double[] triple = parseTriple(raw);
+            if (triple != null) {
+                blocks.add(List.of((int) triple[0], (int) triple[1], (int) triple[2]));
+            }
+        }
+        List<Integer> target = List.of(x, y, z);
+        if (blocks.contains(target)) {
+            return false;
+        }
+        blocks.add(target);
+        // 统一写进 blocks 列表；同时清掉单值 block，避免两处坐标叠加造成歧义
+        section.set("block", null);
+        section.set("blocks", blocks);
+        try {
+            yaml.save(file);
+        } catch (IOException exception) {
+            plugin.getLogger().severe("按钮配置写入失败: " + exception.getMessage());
+            return false;
+        }
+        plugin.getLogger().info("已把按钮 " + key + " 的坐标 " + x + " " + y + " " + z + " 写入 config.yml");
+        return true;
     }
 
     // ------------------------------------------------------------------
@@ -348,6 +428,13 @@ public final class ConfigManager {
         for (String path : CRITICAL_PATHS) {
             if (!yaml.isSet(path)) {
                 problems.add(new Spec.Problem(path, "配置文件缺少该项（可能被清空或截断），已拒绝加载以保留上一份可用配置"));
+            }
+        }
+        // 按钮允许单坐标(block)或多坐标(blocks)两种写法，因此逐个按钮判断
+        for (String key : REQUIRED_BUTTONS) {
+            if (!yaml.isSet("buttons." + key + ".block") && !yaml.isSet("buttons." + key + ".blocks")) {
+                problems.add(new Spec.Problem("buttons." + key,
+                        "缺少 block / blocks（可能被清空或截断），已拒绝加载以保留上一份可用配置"));
             }
         }
 

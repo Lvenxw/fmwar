@@ -9,6 +9,7 @@ import cn.mgtown.fmwar.listener.ButtonListener;
 import cn.mgtown.fmwar.listener.PlayerStateListener;
 import cn.mgtown.fmwar.listener.TeleportGuardListener;
 import cn.mgtown.fmwar.service.AlertService;
+import cn.mgtown.fmwar.service.ButtonCapture;
 import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.GameScoreboard;
 import cn.mgtown.fmwar.service.ShopService;
@@ -31,6 +32,7 @@ public final class FMWar extends JavaPlugin {
     private TeamService teamService;
     private GameScoreboard gameScoreboard;
     private ShopService shopService;
+    private ButtonCapture buttonCapture;
     private GameEngine engine;
 
     @Override
@@ -50,9 +52,10 @@ public final class FMWar extends JavaPlugin {
         gameScoreboard = new GameScoreboard(teamService);
         shopService = new ShopService(this, configService);
         engine = new GameEngine(this, configService, alertService, teamService, gameScoreboard, shopService);
+        buttonCapture = new ButtonCapture(configService, alertService);
 
         getServer().getPluginManager().registerEvents(
-                new ButtonListener(configService, alertService, engine), this);
+                new ButtonListener(configService, alertService, engine, buttonCapture), this);
         getServer().getPluginManager().registerEvents(
                 new PlayerStateListener(engine), this);
         getServer().getPluginManager().registerEvents(
@@ -61,7 +64,7 @@ public final class FMWar extends JavaPlugin {
                 new TeleportGuardListener(configService, engine), this);
 
         CommandHandler handler = new CommandHandler(
-                this, configService, alertService, engine, teamService, shopService);
+                this, configService, alertService, engine, teamService, shopService, buttonCapture);
         PluginCommand command = getCommand("fmwar");
         if (command != null) {
             command.setExecutor(handler);

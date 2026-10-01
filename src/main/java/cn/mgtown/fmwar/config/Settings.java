@@ -69,6 +69,11 @@ public record Settings(
         return button;
     }
 
+    /** 全部按钮键（判定顺序按配置里的出现顺序）。 */
+    public java.util.Set<String> buttonKeys() {
+        return buttons.keySet();
+    }
+
     /** 取提示文案；缺失时返回 key 本身，避免运行期 NPE。 */
     public String message(String key) {
         return messages.getOrDefault(key, key);

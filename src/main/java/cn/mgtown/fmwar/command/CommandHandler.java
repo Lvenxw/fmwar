@@ -4,6 +4,7 @@ import cn.mgtown.FMWar;
 import cn.mgtown.fmwar.game.GameEngine;
 import cn.mgtown.fmwar.game.GamePhase;
 import cn.mgtown.fmwar.service.AlertService;
+import cn.mgtown.fmwar.service.ButtonCapture;
 import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
@@ -32,7 +33,8 @@ import java.util.Set;
  */
 public final class CommandHandler implements CommandExecutor, TabCompleter {
 
-    private static final List<String> SUBCOMMANDS = List.of("reload", "start", "stop", "status", "doctor");
+    private static final List<String> SUBCOMMANDS =
+            List.of("reload", "start", "stop", "status", "doctor", "button");
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -40,15 +42,18 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
     private final GameEngine engine;
     private final TeamService teams;
     private final ShopService shops;
+    private final ButtonCapture buttonCapture;
 
     public CommandHandler(FMWar plugin, ConfigService config, AlertService alerts,
-                          GameEngine engine, TeamService teams, ShopService shops) {
+                          GameEngine engine, TeamService teams, ShopService shops,
+                          ButtonCapture buttonCapture) {
         this.plugin = plugin;
         this.config = config;
         this.alerts = alerts;
         this.engine = engine;
         this.teams = teams;
         this.shops = shops;
+        this.buttonCapture = buttonCapture;
     }
 
     @Override
@@ -67,9 +72,69 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "stop" -> stop(sender);
             case "status" -> status(sender);
             case "doctor" -> doctor(sender, label);
+            case "button" -> button(sender, args);
             default -> usage(sender, label);
         }
         return true;
+    }
+
+    /**
+     * {@code /fmwar button} —— 按钮坐标的查看与游戏内校准。
+     *
+     * <p>无参数：列出每个按钮当前的坐标，提示玩家可以点名字进入校准。
+     * 带参数：进入校准等待状态，玩家随后右键一次目标方块即完成登记并写回配置。</p>
+     */
+    private void button(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(alerts.component("&c按钮校准需要在游戏内执行（要右键方块）"));
+            return;
+        }
+        if (buttonCapture == null) {
+            sender.sendMessage(alerts.component("&c按钮校准功能未启用"));
+            return;
+        }
+        if (args.length >= 2) {
+            String key = args[1].toLowerCase(Locale.ROOT);
+            if (!config.settings().buttons().containsKey(key)) {
+                line(sender, "button-capture-failed", Map.of("button", key));
+                return;
+            }
+            buttonCapture.begin(player, key);
+            return;
+        }
+
+        var buttons = config.settings().buttons();
+        line(sender, "button-list-title", Map.of(
+                "count", Integer.toString(buttons.size()),
+                "radius", String.format("%.1f", buttons.values().stream()
+                        .mapToDouble(cn.mgtown.fmwar.config.Spec.Button::radius).max().orElse(2.0))));
+        for (var entry : buttons.entrySet()) {
+            String blocks = describeBlocks(entry.getValue());
+            line(sender, "button-list-line", Map.of("button", entry.getKey(), "blocks", blocks));
+        }
+        buttonCapture.suggestKeys(player);
+    }
+
+    /** 把按钮的全部坐标渲染成一行，最多显示 4 个。 */
+    private String describeBlocks(cn.mgtown.fmwar.config.Spec.Button button) {
+        if (button.blocks().isEmpty()) {
+            return alerts.render("button-list-none", Map.of());
+        }
+        StringBuilder builder = new StringBuilder();
+        int shown = 0;
+        for (var position : button.blocks()) {
+            if (shown > 0) {
+                builder.append(" / ");
+            }
+            builder.append(String.format("%.0f %.0f %.0f", position.x(), position.y(), position.z()));
+            if (++shown >= 4) {
+                break;
+            }
+        }
+        if (button.blocks().size() > shown) {
+            builder.append(" …共 ").append(button.blocks().size()).append(" 个");
+        }
+        return builder.toString();
     }
 
     /** 按配置文案回显一行。 */

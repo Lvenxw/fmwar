@@ -447,6 +447,8 @@ public final class GameEngine {
             return false;
         }
         if (queue.contains(player.getUniqueId())) {
+            // 以前这里静默返回，玩家只会觉得“按钮没反应”
+            alerts.sendTo(player, "queue-already-joined", Map.of());
             return false;
         }
         queue.add(player.getUniqueId());
@@ -970,6 +972,10 @@ public final class GameEngine {
         }
         if (members.contains(player.getUniqueId())) {
             alerts.sendTo(player, "spectator-only-in-game", Map.of());
+            return false;
+        }
+        if (teams.inSpectatorTeam(player.getUniqueId())) {
+            alerts.sendTo(player, "spectator-already", Map.of());
             return false;
         }
         teams.joinSpectatorTeam(player.getUniqueId());
