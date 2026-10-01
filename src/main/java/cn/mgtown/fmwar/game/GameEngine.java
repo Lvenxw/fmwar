@@ -376,12 +376,14 @@ public final class GameEngine {
         return true;
     }
 
-    /** 主动退出队列（准备房间外移动等路径使用）。 */
-    public void quitQueue(Player player) {
-        if (queue.remove(player.getUniqueId())) {
-            alerts.sendTo(player, "queue-left-self", Map.of());
-            alerts.broadcast("queue-leave", Map.of("player", player.getName()));
-        }
+    /**
+     * 队列成员是否仍在准备房间内。
+     *
+     * <p>队列成员的清理由 {@code syncPrepRoster} 每 tick 统一负责（需求 39：离开准备房间即退出队列），
+     * 因此这里只做查询，避免出现两处各自增删队列导致口径不一致。</p>
+     */
+    public boolean isQueued(UUID uuid) {
+        return queue.contains(uuid);
     }
 
     public Set<UUID> queue() {
@@ -968,14 +970,16 @@ public final class GameEngine {
     // 结束与清场
     // ------------------------------------------------------------------
 
-    /** 请求结束对局（/fmwar stop 或胜负判定）。 */
+    /**
+     * 请求中止对局：走正常结算路径（ENDED → 下一 tick 清场），因此会广播游戏结束，
+     * 而不是像 {@link #stop()} 那样静默强清（后者只用于插件停用的兜底）。
+     */
     public void requestEnd() {
-        if (phase == GamePhase.IDLE) {
+        if (phase == GamePhase.IDLE || phase == GamePhase.ENDING) {
             return;
         }
-        if (phase == GamePhase.RUNNING || phase == GamePhase.PREPARING) {
-            endGame();
-        }
+        ended = true;
+        endGame();
     }
 
     private void endGame() {

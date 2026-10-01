@@ -111,8 +111,8 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             sender.sendMessage(alerts.component("&7当前没有进行中的对局"));
             return;
         }
-        engine.stop();
-        sender.sendMessage(alerts.component("&a已中止对局并完成清场"));
+        engine.requestEnd();
+        sender.sendMessage(alerts.component("&a已中止对局，正在清场"));
     }
 
     private void status(CommandSender sender) {
