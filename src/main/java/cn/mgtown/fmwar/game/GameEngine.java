@@ -119,6 +119,40 @@ public final class GameEngine {
             return;
         }
         tickTask = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
+        preloadChunks();
+    }
+
+    /**
+     * 预加载与玩法强相关的区块。
+     *
+     * <p>奖励箱坐标与开局分散中心若落在未加载区块，`getBlockAt` / `setType` 会在服务端主线程
+     * 同步生成区块，开局瞬间造成明显卡顿。这里在启用时就异步预加载一次，把这份开销挪到开机阶段。</p>
+     */
+    private void preloadChunks() {
+        if (world == null) {
+            return;
+        }
+        Set<Long> chunks = new HashSet<>();
+        for (Position position : config.settings().loot().chestLocations()) {
+            chunks.add(chunkKey((int) Math.floor(position.x()) >> 4, (int) Math.floor(position.z()) >> 4));
+        }
+        Settings.Disperse disperse = config.settings().disperse();
+        chunks.add(chunkKey((int) Math.floor(disperse.centerX()) >> 4, (int) Math.floor(disperse.centerZ()) >> 4));
+        Settings.Duel duel = config.settings().duel();
+        chunks.add(chunkKey((int) Math.floor(duel.centerX()) >> 4, (int) Math.floor(duel.centerZ()) >> 4));
+
+        int loaded = 0;
+        for (long key : chunks) {
+            int chunkX = (int) (key >> 32);
+            int chunkZ = (int) key;
+            world.getChunkAtAsync(chunkX, chunkZ, true).thenAccept(chunk -> { });
+            loaded++;
+        }
+        plugin.getLogger().info("已请求异步预加载 " + loaded + " 个玩法相关区块");
+    }
+
+    private long chunkKey(int chunkX, int chunkZ) {
+        return ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL);
     }
 
     /** 插件停用：强制结算并清场，运行期状态不落盘。 */
@@ -202,12 +236,15 @@ public final class GameEngine {
         long elapsedTicks = timer.elapsedTicks(now);
         Settings settings = config.settings();
 
-        // 0) 场地范围判定（离场/观战离场）
+        // 0) 场地范围判定（离场/观战离场/无关玩家清场）
         checkArenaPresence();
+        // 存活人数只算一次：本 tick 的记分板、周期复核都复用它，
+        // 否则同一 tick 会把名单遍历三遍
+        int alive = aliveCount();
 
         // 1) 记分板（剩余时间 + 存活人数）
         if (settings.scoreboard().enabled()) {
-            scoreboard.update(settings, TimeUtil.mmss(remainingTicks), Integer.toString(aliveCount()));
+            scoreboard.update(settings, TimeUtil.mmss(remainingTicks), Integer.toString(alive));
         }
 
         // 2) 剩 N 秒时把场内玩家集中到决斗圈
@@ -240,7 +277,7 @@ public final class GameEngine {
         }
 
         // 5) 周期性复核：存活人数跌破两人时放弃本局（正常情况下 checkVictory 会先结束对局）
-        if (elapsedTicks % 80L == 0L && aliveCount() < 2) {
+        if (elapsedTicks % 80L == 0L && alive < 2) {
             endGame();
         }
     }

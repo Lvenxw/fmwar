@@ -62,7 +62,7 @@ public final class ButtonListener implements Listener {
             case "spectator" -> engine.trySpectate(player);
             case "prepare" -> engine.prepareClick(player);
             case "back-to-hall" -> engine.leaveToHall(player);
-            default -> alerts.sendTo(player, "reload-failed", java.util.Map.of());
+            default -> { }
         }
     }
 
