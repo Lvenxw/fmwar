@@ -119,7 +119,7 @@ public final class ConfigManager {
         Settings.Start start = new Settings.Start(
                 yaml.getBoolean("start.clear-inventory", true),
                 yaml.getBoolean("start.clear-effects", true),
-                yaml.getBoolean("start.restore-on-leave", false),
+                yaml.getBoolean("start.restore-on-leave", true),
                 yaml.getBoolean("start.block-sneak", false),
                 yaml.getBoolean("start.resistance.enabled", true),
                 yaml.getLong("start.resistance.duration-ticks", 100),

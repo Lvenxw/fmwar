@@ -14,6 +14,7 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
@@ -398,7 +399,7 @@ public final class GameEngine {
             }
             members.add(uuid);
             teams.joinPlayerTeam(uuid);
-            scoreboard.attach(player);
+            scoreboard.attach(player, config.settings());
             participants.add(player);
         }
         queue.clear();
@@ -690,7 +691,13 @@ public final class GameEngine {
         player.updateInventory();
     }
 
-    /** 可选：把入场时备份的背包还给玩家（默认关闭，交给服务器自己的背包备份插件）。 */
+    /**
+     * 可选：把入场时备份的背包还给玩家。
+     *
+     * <p>默认开启；还原动作本身就会覆盖掉场地内拾取的物品，因此顺序是先清空再还原。
+     * 不开启时（{@code start.restore-on-leave=false}）玩家入场前的物品会被丢弃——
+     * 这是为了“游戏内物品不能带出场地”这条硬约束，请按服上是否另有背包备份机制来选择。</p>
+     */
     private void restoreInventory(Player player) {
         if (!config.settings().start().restoreOnLeave()) {
             return;
@@ -698,6 +705,32 @@ public final class GameEngine {
         ItemStack[] backup = inventoryBackups.remove(player.getUniqueId());
         if (backup != null) {
             player.getInventory().setContents(backup);
+        }
+    }
+
+    /** 把死亡时本该掉落的物品放到大厅（需求：死亡玩家的背包被清空，物品不能留在场地里）。 */
+    public void dropAtHall(List<ItemStack> drops) {
+        if (drops == null || drops.isEmpty()) {
+            return;
+        }
+        Position hall = config.settings().locationOrNull("hall-spawn");
+        if (hall == null) {
+            return;
+        }
+        Location location = hall.toLocation();
+        if (location == null) {
+            return;
+        }
+        World target = location.getWorld();
+        if (target == null) {
+            return;
+        }
+        for (ItemStack stack : drops) {
+            if (stack == null || stack.getType().isAir()) {
+                continue;
+            }
+            Item item = target.dropItem(location, stack);
+            item.setPickupDelay(20);
         }
     }
 
@@ -722,7 +755,7 @@ public final class GameEngine {
         }
         teams.joinSpectatorTeam(player.getUniqueId());
         player.setGameMode(GameMode.SPECTATOR);
-        scoreboard.attach(player);
+        scoreboard.attach(player, config.settings());
         teleport(player, config.settings().location("arena-spawn"));
         alerts.sendTo(player, "spectator-enter", Map.of());
         return true;
@@ -747,13 +780,13 @@ public final class GameEngine {
                 // 对局中离线的参战者不再回到对局，按观战处理并送到场地观战点
                 teams.joinSpectatorTeam(uuid);
                 player.setGameMode(GameMode.SPECTATOR);
-                scoreboard.attach(player);
+                scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
                 return;
             }
             if (teams.inSpectatorTeam(uuid)) {
                 player.setGameMode(GameMode.SPECTATOR);
-                scoreboard.attach(player);
+                scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
                 return;
             }

@@ -119,8 +119,9 @@ start:
   clear-inventory: true
   clear-effects: true
   # 离场/死亡后是否把入场时备份的背包还给玩家。
-  # 默认 false：游戏内物品不可带出场地，且服务器通常已有自己的背包备份机制。
-  restore-on-leave: false
+  # 默认 true：入场前的物品属于玩家，不带出场地指的是**游戏内获得的**物品。
+  # 还原后再执行一次清空，保证场地内拿到的附魔装备不会跟着出去。
+  restore-on-leave: true
   # 是否在提示接收范围内一并禁止潜行。
   # 默认 false：需求里的“坐下/躺下/趴下”由坐姿插件提供，原版只有潜行可拦，容易误伤。
   block-sneak: false

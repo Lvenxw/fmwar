@@ -31,13 +31,14 @@ public final class GameScoreboard {
     }
 
     /** 为一名玩家准备记分板并挂上。 */
-    public void attach(Player player) {
+    public void attach(Player player, Settings settings) {
         Scoreboard scoreboard = teams.scoreboard();
         Objective objective = scoreboard.getObjective(OBJECTIVE);
         if (objective == null) {
             objective = scoreboard.registerNewObjective(OBJECTIVE, "dummy");
             objective.setDisplaySlot(DisplaySlot.SIDEBAR);
-            objective.displayName(LEGACY.deserialize("附魔战争"));
+            String title = settings == null ? "附魔战争" : settings.scoreboard().title();
+            objective.displayName(LEGACY.deserialize(nullToEmpty(title)));
         }
         teams.applyScoreboard(player, true);
     }

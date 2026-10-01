@@ -39,6 +39,12 @@ public final class PlayerStateListener implements Listener {
         if (!engine.isRunning() || !engine.isMember(player.getUniqueId())) {
             return;
         }
+        // 需求：死亡玩家的背包要被清空。原版死亡会先把物品掉在场地里，
+        // 这里取消掉落，改为把“本该掉落的物品”放到大厅，避免场地内留下物品堆。
+        java.util.List<org.bukkit.inventory.ItemStack> drops = java.util.List.copyOf(event.getDrops());
+        event.getDrops().clear();
+        event.setDroppedExp(0);
         engine.eliminate(player, "death", true);
+        engine.dropAtHall(drops);
     }
 }
