@@ -198,7 +198,7 @@ chests:
     - - 'NETHERITE_AXE:blood_roar=7'
     - - 'MACE:doom_hammer=1,wind_burst=1'
     - - 'MACE:union=1'
-      - 'HOE:union=1'
+      - 'NETHERITE_HOE:union=1'
     - - 'TRIDENT:daedalus=1,loyalty=3'
     - - 'SPEAR:faith=1,lunge=5'
     - - 'CROSSBOW:fusion_strike=1'
@@ -253,8 +253,10 @@ messages:
   queue-already-joined: '{prefix}&7你已经在游戏队列中，无需重复点击'
   spectator-already: '{prefix}&7你已经在观战模式中'
   prepare-progress: '{prefix}&e准备中 &f{clicks}&7/&f{required}'
-  # 倒计时常驻显示条（BossBar）的文案
+  # 倒计时常驻显示：BossBar（顶部）+ 侧栏兜底（侧栏百分百会渲染）
   prepare-countdown-bar: '{war_prefix}&e游戏将在 &f{seconds} &e秒后开始'
+  prepare-countdown-title: '&6附魔战争'
+  prepare-countdown-line: '&e游戏开始 &f{seconds}'
   prepare-need-two: '{prefix}&c准备房间内至少需要两名已入队玩家'
   prepare-announce: '{war_prefix}&a准备完成，&f{seconds} &a秒后开始游戏'
   prepare-reset: '{prefix}&c有玩家进入准备房间，准备进度已重置'
@@ -286,6 +288,9 @@ messages:
   command-usage-doctor: '&e/{label} doctor &7- 自检配置与 ExtraShop 集成'
   command-usage-button: '&e/{label} button &7- 列出按钮坐标，或进入游戏内校准'
   command-usage-points: '&e/{label} points &7- 查看与管理积分榜（击杀 +1，获胜 +3）'
+  command-usage-debug: '&e/{label} debug &7- 开关准备/队列链路的详细日志（排查按钮与倒计时问题）'
+  debug-on: '{war_prefix}&a已开启调试日志：准备按钮、队列进出、倒计时都会打印到控制台，再执行一次可关闭'
+  debug-off: '{war_prefix}&7已关闭调试日志'
   # ---- 积分榜 ----
   points-list-title: '{war_prefix}&6附魔战争积分榜（共 &f{count} &6人，第 &f{page}&6/&f{pages} &6页）：'
   points-line: '&7{rank}. &a{player} &7- &e{points} &7分'
@@ -297,6 +302,7 @@ messages:
   points-usage-add: '&e/fmwar points add <玩家> <增量> &7- 加减分（增量可为负）'
   points-usage-remove: '&e/fmwar points remove <玩家> &7- 删除该玩家的积分记录'
   points-usage-reset: '&e/fmwar points reset &7- 清空全部积分'
+  points-usage-note: '&7玩家名可以是在线玩家，也可以是曾参与过对局的玩家；每页最多 10 条'
   points-updated: '{war_prefix}&a已将 &f{player} &a的积分设为 &f{points}'
   points-removed: '{war_prefix}&a已删除 &f{player} &a的积分记录'
   points-reset: '{war_prefix}&a已清空全部积分（共 &f{count} &a条）'

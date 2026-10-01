@@ -57,6 +57,20 @@ public record Region(String world, double minX, double minY, double minZ, double
                 && maxX >= other.maxX && maxY >= other.maxY && maxZ >= other.maxZ;
     }
 
+    /**
+     * 只判水平范围（忽略 y）。
+     *
+     * <p>分散/决斗圈的落点判定必须用这个方法：候选点的 y 在采样阶段还不知道，
+     * 用带 y 的 {@link #contains} 传一个占位值（例如 0）会把水泥地以外的一切都判成
+     * “区域外”，导致**所有候选点被拒、分散彻底失败**——这正是曾经的错误。</p>
+     */
+    public boolean containsXZ(String worldName, double x, double z) {
+        if (worldName == null || !worldName.equals(world)) {
+            return false;
+        }
+        return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+    }
+
     /** 解析区域所在世界；世界未加载时返回 null。 */
     public World bukkitWorld() {
         return Bukkit.getWorld(world);

@@ -80,7 +80,9 @@ public final class SafeLocation {
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             double x = centerX + random.nextDouble(-halfSize, halfSize);
             double z = centerZ + random.nextDouble(-halfSize, halfSize);
-            if (within != null && !within.contains(world.getName(), x, 0, z)) {
+            // 必须用只判水平的 containsXZ：候选点的 y 此刻未知，用带 y 的判定传占位值
+            // （例如 0）会把所有候选点判成区域外，分散会 100% 失败
+            if (within != null && !within.containsXZ(world.getName(), x, z)) {
                 continue;
             }
             Location candidate = find(world, x, z, referenceY);

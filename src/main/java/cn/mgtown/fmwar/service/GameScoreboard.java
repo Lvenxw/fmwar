@@ -58,6 +58,17 @@ public final class GameScoreboard {
     /** 倒计时条是否处于“应当显示”的状态。 */
     private boolean countdownActive;
 
+    /**
+     * 准备倒计时的**侧栏**兜底显示。
+     *
+     * <p>BossBar 在某些客户端/资源包环境下可能不显示，而“倒计时看不到”是致命的——
+     * 玩家会以为按钮没生效。这里同时在队伍侧栏上挂一个纯文本倒计时，
+     * 侧栏是百分百会渲染的。</p>
+     */
+    private static final String COUNTDOWN_OBJECTIVE = "fmcd";
+    private static final String COUNTDOWN_ENTRY = "fmcd.time";
+    private Objective countdownObjective;
+
     /** 上一次渲染的积分榜条目名，用于增量增删（避免残留旧名次）。 */
     private final List<String> pointEntries = new ArrayList<>();
 
@@ -96,32 +107,56 @@ public final class GameScoreboard {
         }
     }
 
-    /** 显示/刷新准备倒计时 BossBar（对所有在线的游戏参与者常驻显示）。 */
-    public void showCountdown(String text, double progress) {
+    /** 显示/刷新准备倒计时：BossBar + 侧栏双通道。 */
+    public void showCountdown(String text, String sidebarTitle, String sidebarLine, double progress) {
         countdownActive = true;
+
+        // 通道 1：BossBar
         bossBar.name(LEGACY.deserialize(nullToEmpty(text)));
         bossBar.progress((float) Math.max(0.0, Math.min(1.0, progress)));
         for (Player player : Bukkit.getOnlinePlayers()) {
-            if (!countdownViewers.add(player.getUniqueId())) {
-                continue;
+            if (countdownViewers.add(player.getUniqueId())) {
+                player.showBossBar(bossBar);
             }
-            player.showBossBar(bossBar);
         }
+
+        // 通道 2：侧栏（同一块自建计分板，用独立目标，接管 SIDEBAR 显示位）
+        Scoreboard board = teams.scoreboard();
+        if (countdownObjective == null || countdownObjective.getScoreboard() != board) {
+            countdownObjective = board.getObjective(COUNTDOWN_OBJECTIVE);
+            if (countdownObjective == null) {
+                countdownObjective = board.registerNewObjective(COUNTDOWN_OBJECTIVE, "dummy");
+            }
+        }
+        countdownObjective.displayName(LEGACY.deserialize(nullToEmpty(sidebarTitle)));
+        countdownObjective.setDisplaySlot(DisplaySlot.SIDEBAR);
+        Score score = countdownObjective.getScore(COUNTDOWN_ENTRY);
+        score.setScore(1);
+        score.customName(LEGACY.deserialize(nullToEmpty(sidebarLine)));
     }
 
-    /** 隐藏准备倒计时 BossBar。 */
+    /** 隐藏准备倒计时（BossBar 与侧栏都收起，并恢复游戏侧栏）。 */
     public void hideCountdown() {
-        if (!countdownActive && countdownViewers.isEmpty()) {
-            return;
-        }
-        countdownActive = false;
-        for (UUID uuid : new HashSet<>(countdownViewers)) {
-            Player player = Bukkit.getPlayer(uuid);
-            if (player != null) {
-                player.hideBossBar(bossBar);
+        // BossBar
+        if (countdownActive || !countdownViewers.isEmpty()) {
+            countdownActive = false;
+            for (UUID uuid : new HashSet<>(countdownViewers)) {
+                Player player = Bukkit.getPlayer(uuid);
+                if (player != null) {
+                    player.hideBossBar(bossBar);
+                }
             }
+            countdownViewers.clear();
         }
-        countdownViewers.clear();
+        // 侧栏：把显示位还给游戏侧栏目标
+        if (countdownObjective != null) {
+            Objective game = teams.scoreboard().getObjective(OBJECTIVE);
+            if (game != null) {
+                game.setDisplaySlot(DisplaySlot.SIDEBAR);
+            }
+            countdownObjective.unregister();
+            countdownObjective = null;
+        }
     }
 
     /**
@@ -140,8 +175,10 @@ public final class GameScoreboard {
         }
         objective.displayName(LEGACY.deserialize(nullToEmpty(settings.scoreboard().title())));
         Settings.Scoreboard config = settings.scoreboard();
-        setScore(objective, label(config.timeLine(), "剩余时间"), seconds);
-        setScore(objective, label(config.aliveLine(), "存活人数"), alive);
+        // 条目名是纯文本，不会自动转换 & 颜色码，必须显式渲染成 Component，
+        // 否则侧栏会直接显示 “&e剩余时间” 这种原始代码
+        setScoreName(objective, label(config.timeLine(), "剩余时间"), seconds);
+        setScoreName(objective, label(config.aliveLine(), "存活人数"), alive);
     }
 
     /**
@@ -166,9 +203,11 @@ public final class GameScoreboard {
         return text.isEmpty() ? fallback : text;
     }
 
-    /** 设置一行：条目名是标签，数值是记分值。 */
-    private void setScore(Objective objective, String entry, int value) {
-        objective.getScore(entry).setScore(value);
+    /** 设置一行：条目名是标签（带颜色渲染），数值是记分值。 */
+    private void setScoreName(Objective objective, String label, int value) {
+        Score score = objective.getScore(label);
+        score.setScore(value);
+        score.customName(LEGACY.deserialize(label));
     }
 
     /**

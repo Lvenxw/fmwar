@@ -135,6 +135,14 @@ public final class GameEngine {
     /** 当前查看的积分榜页码（1 起算）。 */
     private int pointsPage = 1;
 
+    /**
+     * 调试日志开关（{@code /fmwar debug}）。
+     *
+     * <p>用 INFO 级别而不是 fine：这样不需要改服务端日志配置就能看到，
+     * 排查“按钮没反应/倒计时不启动”这类问题时可以直接开关。</p>
+     */
+    private boolean debug;
+
     private BukkitTask tickTask;
 
     public GameEngine(FMWar plugin, ConfigService config, AlertService alerts,
@@ -284,22 +292,26 @@ public final class GameEngine {
     private void tickPreparing(long now) {
         syncPrepRoster();
         if (timer != null && timer.expired(now)) {
+            debug("倒计时归零，开始对局（已入队 " + queuedInRoom() + " 人）");
             beginGame();
             return;
         }
         if (timer != null) {
             long remainingTicks = timer.remainingTicks(now);
             long remaining = TimeUtil.ceilSeconds(remainingTicks);
-            // 常驻显示：用 BossBar 而不是动作栏——动作栏只在玩家点按钮时才闪一下，
-            // 而这里要求“在队伍里能常驻显示”
-            // 需求：倒计时期间要常驻显示，同时保留动作栏文案
+            // 双通道常驻显示：BossBar（顶部）+ 侧栏（兜底，侧栏百分百会渲染）
             String text = alerts.render("prepare-countdown-bar", Map.of("seconds", Long.toString(remaining)));
+            String sidebarTitle = alerts.render("prepare-countdown-title", Map.of());
+            String sidebarLine = alerts.render("prepare-countdown-line",
+                    Map.of("seconds", Long.toString(remaining)));
             double progress = timer.durationTicks() <= 0
                     ? 0.0
                     : Math.max(0.0, Math.min(1.0, remainingTicks / (double) timer.durationTicks()));
-            scoreboard.showCountdown(text, progress);
+            scoreboard.showCountdown(text, sidebarTitle, sidebarLine, progress);
             if (remaining != lastCountdownSecond) {
                 lastCountdownSecond = remaining;
+                plugin.getLogger().info("准备倒计时：剩余 " + remaining + " 秒（房间内已入队 "
+                        + queuedInRoom() + " 人）");
                 for (UUID uuid : queue) {
                     Player player = Bukkit.getPlayer(uuid);
                     if (player != null) {
@@ -403,6 +415,23 @@ public final class GameEngine {
     // 准备房间
     // ------------------------------------------------------------------
 
+    /** 调试日志：仅在 /fmwar debug 打开时输出，级别用 INFO 以便无需改服务端配置。 */
+    private void debug(String message) {
+        if (debug) {
+            plugin.getLogger().info("[调试] " + message);
+        }
+    }
+
+    /** 切换调试日志；返回切换后的状态。 */
+    public boolean toggleDebug() {
+        debug = !debug;
+        return debug;
+    }
+
+    public boolean isDebug() {
+        return debug;
+    }
+
     /** 计算“新进入准备房间”的玩家（规则见 {@link PrepRoom}）。 */
     public static Set<UUID> entrants(Set<UUID> previous, Set<UUID> current) {
         return PrepRoom.entrants(previous, current);
@@ -434,22 +463,25 @@ public final class GameEngine {
                 }
                 Player player = Bukkit.getPlayer(uuid);
                 queue.remove(uuid);
+                debug("玩家 " + (player == null ? uuid : player.getName())
+                        + " 已不在准备房间范围内，退出队列（队列剩余 " + queue.size() + "）");
                 if (player != null) {
                     alerts.sendTo(player, "queue-left-self", Map.of());
                     alerts.broadcast("queue-leave", Map.of("player", player.getName()));
                 }
             }
             // 排查用：名单变化时写下“谁新进来”，便于确认进度是被真实进入事件还是
-            // 异常抖动重置的（出问题时开服务端 debug: true 即可看到）
+            // 异常抖动重置的
             if (!entered.isEmpty() && prepareClicks > 0) {
-                plugin.getLogger().fine("准备房间新增玩家 " + entered.size()
-                        + " 名，准备进度由 " + prepareClicks + " 重置为 0");
+                debug("准备房间新增 " + entered.size() + " 名玩家，准备进度由 "
+                        + prepareClicks + " 重置为 0");
             }
         }
 
         if (timer != null) {
             // 倒计时期间准备房间内已入队人数不足两人：退回准备阶段并提示
             if (queuedInRoom() < 2) {
+                debug("倒计时被取消：准备房间内已入队人数降到 " + queuedInRoom() + " 人");
                 timer = null;
                 prepareClicks = 0;
                 lastCountdownSecond = -1L;
@@ -485,6 +517,12 @@ public final class GameEngine {
     /** 右键准备按钮。 */
     public void prepareClick(Player player) {
         Settings settings = config.settings();
+        long required = settings.timing().prepareClicks();
+        debug("准备按钮被点击：玩家=" + player.getName() + " 阶段=" + phase
+                + " 进度=" + prepareClicks + "/" + required
+                + " 倒计时中=" + (timer != null)
+                + " 房间内已入队=" + queuedInRoom()
+                + " 队列=" + queue.size());
         // 倒计时已经开始后不再接受点击：否则每点一下都会把倒计时重建一次
         //（表现为“进度涨到 35/7 却永远不开始”）
         if (timer != null) {
@@ -493,10 +531,10 @@ public final class GameEngine {
             return;
         }
         if (!canStart()) {
+            debug("准备按钮被拒绝：准备房间内已入队玩家不足 2 人（当前 " + queuedInRoom() + "）");
             alerts.sendActionBarTo(player, "prepare-need-two", Map.of());
             return;
         }
-        long required = settings.timing().prepareClicks();
         // 计数上限就是目标次数，绝不越过（避免出现 35/7 这类读数）
         prepareClicks = (int) Math.min(required, prepareClicks + 1L);
         alerts.sendActionBarTo(player, "prepare-progress", Map.of(
@@ -505,6 +543,7 @@ public final class GameEngine {
         if (prepareClicks >= required) {
             long countdownTicks = Math.max(1L, settings.timing().prepareCountdownSeconds()) * 20L;
             timer = new Timer(GamePhase.PREPARING, Bukkit.getCurrentTick(), countdownTicks);
+            phase = GamePhase.PREPARING;
             lastCountdownSecond = -1L;
             // 进入倒计时瞬间立刻取一次名单基准值：这一 tick 的事件回调先于引擎 tick 执行，
             // 若不刷新，引擎 tick 里的 syncPrepRoster 会把“原本就在房间里的人”当成新进入者，
@@ -514,6 +553,8 @@ public final class GameEngine {
                     Map.of("seconds", Long.toString(settings.timing().prepareCountdownSeconds())));
             plugin.getLogger().info("准备完成（" + prepareClicks + "/" + required + "），"
                     + settings.timing().prepareCountdownSeconds() + " 秒后开始对局");
+            debug("已进入 PREPARING：倒计时 " + countdownTicks + " tick，"
+                    + "名单基准 " + prepRoster.size() + " 人");
         }
     }
 
@@ -559,8 +600,12 @@ public final class GameEngine {
         }
         queue.add(player.getUniqueId());
         teleport(player, config.settings().location("prep-spawn"));
+        // 入队即挂上本插件的记分板：准备倒计时的侧栏显示依赖它，
+        // 否则玩家在准备房间里看不到常驻倒计时
+        scoreboard.attach(player, config.settings());
         alerts.sendTo(player, "queue-joined-self", Map.of());
         alerts.broadcast("queue-join", Map.of("player", player.getName()));
+        debug("玩家 " + player.getName() + " 加入队列，当前队列 " + queue.size() + " 人");
         return true;
     }
 

@@ -37,7 +37,7 @@ import java.util.UUID;
 public final class CommandHandler implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS =
-            List.of("reload", "start", "stop", "status", "doctor", "button", "points");
+            List.of("reload", "start", "stop", "status", "doctor", "button", "points", "debug");
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -79,6 +79,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "doctor" -> doctor(sender, label);
             case "button" -> button(sender, args);
             case "points" -> points(sender, args);
+            case "debug" -> debug(sender);
             default -> usage(sender, label);
         }
         return true;
@@ -97,20 +98,35 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
      * </pre>
      */
     private void points(CommandSender sender, String[] args) {
-        String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
-        switch (action) {
+        // 无子指令时：给出完整用法提示（此前直接当 list 处理，玩家看不到任何指令说明）
+        if (args.length < 2) {
+            pointsUsage(sender);
+            return;
+        }
+        switch (args[1].toLowerCase(Locale.ROOT)) {
             case "list", "page" -> pointsList(sender, args.length >= 3 ? args[2] : "1");
             case "set" -> pointsSet(sender, args);
             case "add" -> pointsAdd(sender, args);
             case "remove", "delete", "del" -> pointsRemove(sender, args);
             case "reset", "clear" -> pointsReset(sender);
-            default -> {
-                line(sender, "points-usage-title", Map.of());
-                for (String usage : new String[]{"list", "set", "add", "remove", "reset"}) {
-                    line(sender, "points-usage-" + usage, Map.of());
-                }
-            }
+            case "help", "?" -> pointsUsage(sender);
+            default -> pointsUsage(sender);
         }
+    }
+
+    /** {@code /fmwar debug} —— 切换准备/队列链路的详细日志（排查按钮与倒计时问题）。 */
+    private void debug(CommandSender sender) {
+        boolean on = engine.toggleDebug();
+        line(sender, on ? "debug-on" : "debug-off", Map.of());
+    }
+
+    /** 打印积分榜的全部子指令。 */
+    private void pointsUsage(CommandSender sender) {
+        line(sender, "points-usage-title", Map.of());
+        for (String usage : new String[]{"list", "set", "add", "remove", "reset"}) {
+            line(sender, "points-usage-" + usage, Map.of());
+        }
+        line(sender, "points-usage-note", Map.of());
     }
 
     /** 每页最多显示的条目数。 */
@@ -450,6 +466,35 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
                 }
             }
             return result;
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("points")) {
+            List<String> result = new ArrayList<>();
+            for (String action : new String[]{"list", "set", "add", "remove", "reset"}) {
+                if (action.startsWith(args[1].toLowerCase(Locale.ROOT))) {
+                    result.add(action);
+                }
+            }
+            return result;
+        }
+        // points set/add/remove 的第三个参数补全玩家名（在线玩家 + 已有记录）
+        if (args.length == 3 && args[0].equalsIgnoreCase("points")) {
+            String action = args[1].toLowerCase(Locale.ROOT);
+            if (action.equals("set") || action.equals("add") || action.equals("remove")
+                    || action.equals("delete") || action.equals("del")) {
+                String prefix = args[2].toLowerCase(Locale.ROOT);
+                List<String> result = new ArrayList<>();
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    if (online.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                        result.add(online.getName());
+                    }
+                }
+                for (var entry : points.ranking()) {
+                    if (entry.name().toLowerCase(Locale.ROOT).startsWith(prefix) && !result.contains(entry.name())) {
+                        result.add(entry.name());
+                    }
+                }
+                return result;
+            }
         }
         return List.of();
     }
