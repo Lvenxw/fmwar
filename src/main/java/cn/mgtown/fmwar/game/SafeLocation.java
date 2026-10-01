@@ -49,10 +49,14 @@ public final class SafeLocation {
         return null;
     }
 
-    /** 在圆形区域内采样一个满足最小间距的落脚点；找不到返回 null。 */
+    /**
+     * 在圆形区域内采样一个满足最小间距、且**落在指定区域内**的落脚点；找不到返回 null。
+     *
+     * @param within 落点必须落在其中（通常传场地）；传 null 表示不限制
+     */
     public static Location sample(World world, double centerX, double centerZ,
                                   double radius, double minSpacing, int maxAttempts,
-                                  java.util.List<Location> taken) {
+                                  java.util.List<Location> taken, cn.mgtown.fmwar.config.Region within) {
         ThreadLocalRandom random = ThreadLocalRandom.current();
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             double angle = random.nextDouble(0, Math.PI * 2);
@@ -60,8 +64,15 @@ public final class SafeLocation {
             double distance = Math.sqrt(random.nextDouble()) * radius;
             double x = centerX + Math.cos(angle) * distance;
             double z = centerZ + Math.sin(angle) * distance;
+            // 越出场地矩形的候选点直接丢弃：否则玩家一落地就被判“离开游戏”
+            if (within != null && !within.contains(world.getName(), x, 0, z)) {
+                continue;
+            }
             Location candidate = find(world, x, z);
             if (candidate == null) {
+                continue;
+            }
+            if (within != null && !within.contains(candidate)) {
                 continue;
             }
             boolean tooClose = false;

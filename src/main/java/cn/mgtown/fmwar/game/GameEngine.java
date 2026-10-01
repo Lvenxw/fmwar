@@ -91,6 +91,14 @@ public final class GameEngine {
     /** 无关玩家上一次收到“不能进入场地”提示的 tick；避免重传时反复刷屏。 */
     private final Map<UUID, Long> outsiderNotice = new HashMap<>();
     private static final long OUTSIDER_NOTICE_INTERVAL_TICKS = 200L;
+    /**
+     * 开局后跳过场地判定的 tick 数。
+     *
+     * <p>开局传送是异步的（{@code teleportAsync}），刚落地的若干 tick 内玩家读到的仍是
+     * 准备房间（在场地外）的旧坐标。若不跳过，一局会在开始的那一 tick 就把所有参战者
+     * 判成“离开游戏”，直接以“无人生还”收场。2 秒足够任何一次本地传送落地。</p>
+     */
+    private static final long SETTLE_TICKS = 40L;
 
     /** 被本插件淘汰、等待主动重生的玩家：只有这些人的重生点会被改写为大厅。 */
     private final Set<UUID> pendingRespawn = new HashSet<>();
@@ -216,11 +224,14 @@ public final class GameEngine {
         long now = Bukkit.getCurrentTick();
         switch (phase) {
             case IDLE -> {
-                // 空闲阶段：准备进度归零，并保证“离开准备房间即退出队列”始终生效
-                if (prepareClicks != 0) {
+                // 空闲阶段要保证“离开准备房间即退出队列”始终生效。
+                // 注意：这里**绝不能**无条件清零 prepareClicks——右键事件回调先于本 tick 执行，
+                // 无条件清零会把玩家刚刚点出的进度当 tick 抹掉，表现为“按多少次都只显示 1/7”。
+                // 进度只在“准备房间一个人都没有”时才归零。
+                syncPrepRoster();
+                if (prepRoster.isEmpty() && prepareClicks != 0) {
                     prepareClicks = 0;
                 }
-                syncPrepRoster();
             }
             case PREPARING -> tickPreparing(now);
             case RUNNING -> tickRunning(now);
@@ -258,7 +269,11 @@ public final class GameEngine {
         Settings settings = config.settings();
 
         // 0) 场地范围判定（离场/观战离场/无关玩家清场）
-        checkArenaPresence();
+        //    刚开局的若干 tick 内不做判定：玩家的传送是异步的，此刻他们读到的仍是
+        //    准备房间（在场地外）的旧坐标，会被立刻误判为“离开游戏”，一局直接作废。
+        if (elapsedTicks >= SETTLE_TICKS) {
+            checkArenaPresence();
+        }
         // 存活人数只算一次：本 tick 的记分板、周期复核都复用它，
         // 否则同一 tick 会把名单遍历三遍
         int alive = aliveCount();
@@ -654,9 +669,17 @@ public final class GameEngine {
     // 开局分散与决斗圈
     // ------------------------------------------------------------------
 
+    /**
+     * 开局分散。
+     *
+     * <p>落点必须**落在场地内**：分散圆是按半径采样的，而半径可能超出场地矩形，
+     * 越界的玩家会在开局后立刻被判“离开游戏”——表现为刚开局就“无人生还”。
+     * 因此采样时把场地作为硬约束传进去，越界候选点直接丢弃。</p>
+     */
     private void disperse(List<Player> participants) {
         Settings settings = config.settings();
         Settings.Disperse disperse = settings.disperse();
+        Region arena = settings.optionalRegion("arena");
         if (!disperse.enabled() || world == null) {
             for (Player player : participants) {
                 teleport(player, settings.location("arena-spawn"));
@@ -668,7 +691,7 @@ public final class GameEngine {
             final Player player = participants.get(index);
             final int slot = index;
             Location sample = SafeLocation.sample(world, disperse.centerX(), disperse.centerZ(),
-                    disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken);
+                    disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken, arena);
             if (sample != null) {
                 taken.add(sample);
                 teleport(player, sample);
@@ -679,7 +702,7 @@ public final class GameEngine {
             int chunkZ = (int) Math.floor(disperse.centerZ()) >> 4;
             world.getChunkAtAsync(chunkX, chunkZ).thenAccept(chunk -> Bukkit.getScheduler().runTask(plugin, () -> {
                 Location retry = SafeLocation.sample(world, disperse.centerX(), disperse.centerZ(),
-                        disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken);
+                        disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(), taken, arena);
                 if (retry != null) {
                     taken.add(retry);
                     teleport(player, retry);
@@ -698,10 +721,12 @@ public final class GameEngine {
         if (target == null) {
             return;
         }
+        // 决斗圈同样以场地为硬约束：越界落点一样会被判“离开游戏”
+        Region arena = settings.optionalRegion("arena");
         List<Location> taken = new ArrayList<>();
         for (Player player : onlineMembers()) {
             Location sample = SafeLocation.sample(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken);
+                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena);
             if (sample == null) {
                 teleport(player, settings.location("arena-spawn"));
                 continue;

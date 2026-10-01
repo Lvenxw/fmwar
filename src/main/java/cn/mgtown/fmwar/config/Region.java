@@ -39,6 +39,17 @@ public record Region(String world, double minX, double minY, double minZ, double
         return x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ;
     }
 
+    /**
+     * 圆形范围是否完全落在本区域的水平投影内（忽略 y）。
+     *
+     * <p>用于校验“开局分散圆”“决斗圈”有没有伸出场地：一旦伸出，落在界外的玩家会在
+     * 开局后立刻被判“离开游戏”，表现为刚开局就“无人生还”。这是纯几何判定，可被断言覆盖。</p>
+     */
+    public boolean containsCircleXZ(double centerX, double centerZ, double radius) {
+        return centerX - radius >= minX && centerX + radius <= maxX
+                && centerZ - radius >= minZ && centerZ + radius <= maxZ;
+    }
+
     /** 本区域是否完全包含另一个区域（用于校验提示接收范围覆盖场地）。 */
     public boolean covers(Region other) {
         return other != null

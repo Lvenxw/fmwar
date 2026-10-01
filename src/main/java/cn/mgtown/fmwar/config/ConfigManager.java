@@ -125,17 +125,18 @@ public final class ConfigManager {
                 yaml.getLong("timing.emerald-interval", 30),
                 yaml.getDouble("timing.overtime-damage", 2.0));
 
+        // 注意数组下标：center 的配置写法是 [x, z, y]（前两个是平面坐标，第三个可选）
         double[] disperseCenter = parseCenter(yaml, "disperse.center", defaultWorld);
         Settings.Disperse disperse = new Settings.Disperse(
                 yaml.getBoolean("disperse.enabled", true),
-                disperseCenter[0], disperseCenter[2],
+                disperseCenter[0], disperseCenter[1],
                 yaml.getDouble("disperse.radius", 100.0),
                 yaml.getDouble("disperse.min-spacing", 25.0),
                 (int) yaml.getLong("disperse.max-attempts", 600));
 
         double[] duelCenter = parseCenter(yaml, "duel.center", defaultWorld);
         Settings.Duel duel = new Settings.Duel(
-                duelCenter[0], duelCenter[2],
+                duelCenter[0], duelCenter[1],
                 yaml.getDouble("duel.radius", 40.0),
                 yaml.getDouble("duel.min-spacing", 5.0),
                 (int) yaml.getLong("duel.max-attempts", 300));
@@ -452,6 +453,27 @@ public final class ConfigManager {
                 problems.add(new Spec.Problem("regions." + key + ".world", "世界未加载: " + region.world()));
             }
         }
+
+        // 开局分散圆与决斗圈必须完全落在场地内（水平投影）。
+        // 越界落点会被 checkArenaPresence 立刻判成“离开游戏”，表现为一开局就“无人生还”。
+        Region arenaRegion = regions.get("arena");
+        if (arenaRegion != null && !missingRequired.contains("regions.arena")) {
+            Settings.Disperse disperse = parsed.disperse();
+            if (disperse.enabled() && !arenaRegion.containsCircleXZ(
+                    disperse.centerX(), disperse.centerZ(), disperse.radius())) {
+                problems.add(new Spec.Problem("disperse",
+                        "分散圆越出 regions.arena（中心 " + fmt(disperse.centerX()) + "," + fmt(disperse.centerZ())
+                                + " 半径 " + fmt(disperse.radius()) + " 超出场地边界）"
+                                + " —— 玩家会落在场地外并被立刻判为离开游戏"));
+            }
+            Settings.Duel duel = parsed.duel();
+            if (!arenaRegion.containsCircleXZ(duel.centerX(), duel.centerZ(), duel.radius())) {
+                problems.add(new Spec.Problem("duel",
+                        "决斗圈越出 regions.arena（中心 " + fmt(duel.centerX()) + "," + fmt(duel.centerZ())
+                                + " 半径 " + fmt(duel.radius()) + " 超出场地边界）"
+                                + " —— 传送过去的玩家会被立刻判为离开游戏"));
+            }
+        }
         for (String key : REQUIRED_LOCATIONS) {
             if (missingRequired.contains("locations." + key)) {
                 problems.add(new Spec.Problem("locations." + key, "缺失（已用占位坐标，传送不会生效）"));
@@ -517,8 +539,7 @@ public final class ConfigManager {
         }
         if (parsed.timing().prepareClicks() <= 0) {
             problems.add(new Spec.Problem("timing.prepare-clicks", "必须为正整数"));
-        }
-        if (parsed.timing().gameDurationSeconds() <= 0) {
+        }        if (parsed.timing().gameDurationSeconds() <= 0) {
             problems.add(new Spec.Problem("timing.game-duration", "必须为正整数"));
         }
         if (parsed.extraShopsEnabled() && parsed.extraShopIds().isEmpty()) {
@@ -535,6 +556,14 @@ public final class ConfigManager {
 
     private boolean worldMissing(String world) {
         return world == null || Bukkit.getWorld(world) == null;
+    }
+
+    /** 校验信息里用的紧凑数字格式（去掉多余小数位）。 */
+    private String fmt(double value) {
+        if (value == Math.rint(value)) {
+            return Long.toString((long) value);
+        }
+        return String.format(java.util.Locale.ROOT, "%.1f", value);
     }
 
     private boolean sameWorld(Region a, Region b) {
