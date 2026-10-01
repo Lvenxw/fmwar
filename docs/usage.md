@@ -41,7 +41,12 @@
 | `/fmwar doctor` | `fmwar.admin` | 配置校验 + 每个商店的 `defined/spawned` + **每个附魔键是否已注册** |
 | `/fmwar reload` | `fmwar.admin` | 重新加载配置。**校验不通过会保留上一份可用配置**并报错 |
 | `/fmwar button` | `fmwar.admin` | 列出四个按钮的坐标,并可点名字进入校准 |
-| `/fmwar points` | `fmwar.admin` | 查看附魔战争积分榜(击杀 +1,获胜 +3) |
+| `/fmwar points` | `fmwar.admin` | 查看附魔战争积分榜(每页最多 10 条) |
+| `/fmwar points list <页码>` | `fmwar.admin` | 翻页查看积分榜 |
+| `/fmwar points set <玩家> <分值>` | `fmwar.admin` | 设为指定分值(0 表示删除) |
+| `/fmwar points add <玩家> <增量>` | `fmwar.admin` | 加减分(增量可为负) |
+| `/fmwar points remove <玩家>` | `fmwar.admin` | 删除该玩家的积分记录 |
+| `/fmwar points reset` | `fmwar.admin` | 清空全部积分 |
 | `/fmwar start` | `fmwar.admin` | 跳过准备按钮,把准备房间内已入队玩家直接拉入对局(调试用) |
 | `/fmwar stop` | `fmwar.admin` | 中止当前对局并清场 |
 
@@ -79,13 +84,21 @@
 | 剩余 60 秒 | 所有存活玩家被传送到**决斗圈**(以 `-1311 -1740` 为圆心、半径 40 格) |
 | 倒计时归零 | 仍在场地内的玩家**每秒扣除 2 点血量**,直到决出最后一人 |
 
+### 倒计时显示
+
+准备按钮点满后,屏幕上方会出现一条**常驻的倒计时进度条**(BossBar),从 10 秒递减;
+动作栏同时也会显示秒数。倒计时结束即开始对局。
+
+### 记分板显示
+
 ### 积分榜
 
 - 右侧还有一块**附魔战争积分榜**(记分板 `fmjfb`),显示累积得分。
 - **每击杀一人 +1 分**,**获得最终胜利 +3 分**。
-- 积分跨对局累积并保存在 `plugins/fmwar/points.yml`,可用 `/fmwar points` 查看。
-- 计分板 `fm` 的剩余时间与存活人数直接写数值(如 `剩余时间 900`、`存活人数 5`);
-  想改回 `mm:ss` 把 `scoreboard.time-seconds` 设为 `false`。
+- 积分跨对局累积并保存在 `plugins/fmwar/points.yml`,可用 `/fmwar points` 查看;
+  管理用 `/fmwar points set|add|remove|reset`(见指令表)。
+- 记分板侧栏**数值写在记分值上**:显示为「剩余时间 …… 900」「存活人数 …… 2」。
+  想让剩余时间变成 `mm:ss`,把 `scoreboard.time-seconds` 设为 `false`。
 
 ### 关于物品
 
