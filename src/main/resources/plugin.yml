@@ -1,6 +1,22 @@
 name: fmwar
 version: '${version}'
-
-main: cn.mgtown.fmwar
+main: cn.mgtown.FMWar
 api-version: '1.21.11'
 load: POSTWORLD
+description: 附魔战争 - 场地 PvP 小游戏
+authors: [mgtown]
+softdepend: [ExtraShop, Residence]
+
+commands:
+  fmwar:
+    description: 附魔战争管理指令
+    usage: /fmwar <reload|start|stop|status|doctor>
+    aliases: [fm]
+
+permissions:
+  fmwar.admin:
+    description: 附魔战争管理权限（reload / start / stop / status / doctor）
+    default: op
+  fmwar.play:
+    description: 允许点击加入游戏 / 观战按钮
+    default: true

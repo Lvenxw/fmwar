@@ -1,0 +1,235 @@
+# ===========================================================================
+# 附魔战争 (FMWar) 配置
+#
+# 所有坐标、装备、时间、shopId 均可修改，改完执行 /fmwar reload 生效。
+# 坐标写法：
+#   单点  -> [x, y, z] 或 { x: 1, y: 2, z: 3 }（可再加 facing: {x,y,z} 指定朝向点）
+#   区域  -> min: [x,y,z] / max: [x,y,z]，加载时自动取小值为 min、大值为 max，
+#            因此不必关心两个角点的先后顺序。
+# 提示文案支持 & 颜色代码与 {player} / {prefix} 占位符。
+# ===========================================================================
+
+config-version: 1
+
+# 全局消息前缀，可用 {prefix} 在任意文案中引用
+prefix: '&6[附魔战争]&r '
+
+# ===========================================================================
+# 区域与传送点
+# ===========================================================================
+world: world
+
+regions:
+  # 游戏场地（正式对局范围）
+  arena:
+    min: [-1354, 39, -2041]
+    max: [-894, 300, -1389]
+  # 提示接收范围（比场地略大，只有范围内的玩家能看到游戏提示）
+  notify:
+    min: [-1354, 39, -2041]
+    max: [-857, 320, -1389]
+  # 准备房间
+  prep-room:
+    min: [-893, 94, -1734]
+    max: [-876, 140, -1688]
+  # 大厅
+  hall:
+    min: [-890, 102, -1715]
+    max: [-879, 130, -1707]
+  # 决斗圈 1
+  duel-1:
+    min: [-1354, 94, -1693]
+    max: [-1266, 172, -1786]
+
+locations:
+  # 场地传送点（观战入场点）；facing 指定朝向点
+  arena-spawn:
+    point: [-1157, 101, -1823]
+    facing: [-1157, 101, -1822]
+  # 准备房间传送点
+  prep-spawn:
+    point: [-882, 95, -1711]
+    facing: [-883, 95, -1711]
+  # 大厅传送点
+  hall-spawn:
+    point: [-887, 102, -1711]
+    facing: [-886, 102, -1711]
+
+# ===========================================================================
+# 按钮（右键触发）；radius 为按钮方块的作用半径
+# ===========================================================================
+buttons:
+  # 大厅：加入游戏
+  join:
+    block: [-880, 103, -1711]
+    radius: 1.5
+  # 准备房间：准备按钮，连续右键 clicks 次开始
+  prepare:
+    block: [-886, 96, -1711]
+    radius: 1.5
+  # 准备房间：返回大厅
+  back-to-hall:
+    block: [-879, 96, -1711]
+    radius: 1.5
+  # 大厅：观战
+  spectator:
+    block: [-881, 103, -1708]
+    radius: 1.5
+
+# ===========================================================================
+# 时间（秒）
+# ===========================================================================
+timing:
+  # 准备按钮需要连续右键的次数
+  prepare-clicks: 7
+  # 准备倒计时（准备按钮达成后开始）
+  prepare-countdown: 10
+  # 对局总时长；倒计时归零后场地内玩家每秒扣血
+  game-duration: 900
+  # 剩余多少秒时把场内玩家传送到决斗圈
+  duel-teleport-at: 60
+  # 每多少秒发放一颗绿宝石
+  emerald-interval: 30
+  # 倒计时归零后的每秒扣血量
+  overtime-damage: 2
+
+# ===========================================================================
+# 开局分散（围绕场地中心点）
+# ===========================================================================
+disperse:
+  enabled: true
+  center: [-1078, -1774, 0]
+  radius: 100
+  min-spacing: 25
+  max-attempts: 600
+
+# ===========================================================================
+# 决斗圈传送
+# ===========================================================================
+duel:
+  center: [-1311, -1740, 0]
+  radius: 40
+  max-attempts: 300
+
+# ===========================================================================
+# 开局给予效果（对局开始时执行一次）
+# ===========================================================================
+start:
+  # 清空背包 + 清除药水效果
+  clear-inventory: true
+  clear-effects: true
+  # 离场/死亡后是否把入场时备份的背包还给玩家。
+  # 默认 false：游戏内物品不可带出场地，且服务器通常已有自己的背包备份机制。
+  restore-on-leave: false
+  # 是否在提示接收范围内一并禁止潜行。
+  # 默认 false：需求里的“坐下/躺下/趴下”由坐姿插件提供，原版只有潜行可拦，容易误伤。
+  block-sneak: false
+  # 抗性提升（tick）
+  resistance:
+    enabled: true
+    duration-ticks: 100
+    amplifier: 4
+  # 回满血量与饱食度
+  heal: true
+  # 发放钓鱼竿
+  fishing-rod:
+    enabled: true
+    material: FISHING_ROD
+    # 附魔写法："<完整命名空间键>=<等级>"，列表形式避免 YAML 把冒号当键值分隔
+    enchantments:
+      - 'minecraft:lure=255'
+      - 'minecraft:luck_of_the_sea=255'
+      - 'minecraft:magic_detection=5'
+
+# ===========================================================================
+# 游戏中每 interval 秒发放绿宝石
+# ===========================================================================
+emerald:
+  amount: 1
+
+# ===========================================================================
+# 奖励箱
+#
+# chests          : 箱子生成的坐标（配置化）
+# loot-groups     : 每个箱子从这些行中随机取一行，只放这一行的物品
+# 物品写法         : "<材质>[:[命名空间:]附魔键=等级[,...]]"
+# 附魔键缺省命名空间为 minecraft。解析失败的条目会写日志并被跳过。
+# ===========================================================================
+chests:
+  # 奖励箱生成的坐标
+  locations:
+    - [-1170, 84, -1964]
+    - [-1034, 69, -1928]
+    - [-1015, 80, -1814]
+    - [-961, 88, -1746]
+    - [-1219, 99, -1785]
+    - [-1132, 163, -1574]
+  loot-groups:
+    - - 'NETHERITE_SWORD:overlay_network=6'
+    - - 'NETHERITE_AXE:blood_roar=7'
+    - - 'MACE:doom_hammer=1,wind_burst=1'
+    - - 'MACE:union=1'
+      - 'HOE:union=1'
+    - - 'TRIDENT:daedalus=1,loyalty=3'
+    - - 'SPEAR:faith=1,lunge=5'
+    - - 'CROSSBOW:fusion_strike=1'
+    - - 'BOW:eternal=1'
+      - 'TIPPED_ARROW:instant_damage=1'
+    - - 'NETHERITE_HELMET:evil_frenzy=1'
+      - 'FISHING_ROD:magnetic_link=1,beach_boy=2'
+    - - 'NETHERITE_CHESTPLATE:fortitude=1'
+
+# ===========================================================================
+# ExtraShop 集成：对局开始时 spawn、结束时 despawn 的商店 id
+# 这些商店必须已在服务器上用 /eshop 预先定义并摆放在场地内。
+# ===========================================================================
+extra-shops:
+  enabled: true
+  ids: [fmcm1, fmcm2, fmcm3, fmcm4, fmcm5, fmcm6]
+
+# ===========================================================================
+# 队伍名（Bukkit 计分板队伍）与记分板
+# ===========================================================================
+teams:
+  player: fm
+  spectator: fmgz
+
+scoreboard:
+  enabled: true
+  title: '&6附魔战争'
+  time-line: '&e剩余时间 &f{time}'
+  alive-line: '&e存活人数 &f{alive}'
+
+# ===========================================================================
+# 提示文案（{player} 会被替换为玩家名，不含前缀部分请自行加 {prefix}）
+# ===========================================================================
+messages:
+  # 是否把高频状态提示同时发到动作栏（true 时聊天栏只保留关键事件）
+  actionbar: true
+  queue-join: '{prefix}&a{player} &7加入游戏队列'
+  queue-leave: '{prefix}&c{player} &7退出游戏队列'
+  queue-joined-self: '{prefix}&a你已加入游戏队列，请在准备房间内等待'
+  queue-left-self: '{prefix}&7你已退出游戏队列'
+  prepare-progress: '{prefix}&e准备中 &f{clicks}&7/&f{required}'
+  prepare-need-two: '{prefix}&c准备房间内至少需要两名已入队玩家'
+  prepare-announce: '{prefix}&a准备完成，即将开始游戏'
+  prepare-reset: '{prefix}&c有玩家进入准备房间，准备进度已重置'
+  prepare-countdown: '{prefix}&e游戏将在 &f{seconds} &e秒后开始'
+  duel-teleport: '{prefix}&c剩余时间不足，已把你传送到决斗圈'
+  game-start: '{prefix}&a游戏开始！'
+  game-already-running: '{prefix}&c游戏已经开始，暂时无法加入'
+  spectator-unavailable: '{prefix}&c当前没有进行中的对局，无法观战'
+  spectator-only-in-game: '{prefix}&c你正在游戏中，无法观战'
+  spectator-enter: '{prefix}&7你已进入观战模式'
+  action-blocked: '{prefix}&c该动作在游戏场地范围内不允许'
+  spectator-arena-exit: '{prefix}&7你已离开场地范围'
+  player-arena-exit: '{prefix}&c{player} &7离开了游戏'
+  death: '{prefix}&c{player} &7死亡'
+  quit: '{prefix}&c{player} &7离开了游戏'
+  win: '{prefix}&6{player} &e获得胜利，游戏结束'
+  no-survivor: '{prefix}&7无人生还，游戏结束'
+  game-over: '{prefix}&7游戏结束'
+  reload-ok: '{prefix}&a配置已重新加载'
+  reload-failed: '{prefix}&c配置加载失败，请查看控制台日志'
+  no-permission: '{prefix}&c你没有权限执行该操作'
+  chest-not-found: '{prefix}&7商店 &f{shop} &7未定义，请先在服务器上配置'
