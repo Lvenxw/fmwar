@@ -53,6 +53,37 @@ public final class LootParser {
         return items;
     }
 
+    /**
+     * 静态解析物品定义里出现的附魔键（不做注册表查询、不产生副作用）。
+     *
+     * <p>供 /fmwar doctor 在运行期核对"配置里写的键在本服注册表里到底存不存在"——
+     * 这是本插件唯一无法在编译期或仓库内验证的外部依赖。</p>
+     */
+    public static List<String> rawEnchantmentKeys(String raw) {
+        List<String> keys = new ArrayList<>();
+        if (raw == null || raw.isBlank()) {
+            return keys;
+        }
+        String text = raw.trim();
+        int colon = text.indexOf(':');
+        if (colon < 0) {
+            return keys;
+        }
+        for (String fragment : text.substring(colon + 1).split("[;,]|、")) {
+            String piece = fragment.trim();
+            int equals = piece.indexOf('=');
+            if (equals <= 0) {
+                continue;
+            }
+            String keyText = piece.substring(0, equals).trim();
+            if (keyText.isEmpty() || keyText.equalsIgnoreCase("potion") || keyText.equalsIgnoreCase("amplifier")) {
+                continue;
+            }
+            keys.add(keyText);
+        }
+        return keys;
+    }
+
     /** 解析单个物品定义；失败返回 null 并回调 warn。 */
     public ItemStack parse(String raw) {
         if (raw == null || raw.isBlank()) {

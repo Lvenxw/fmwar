@@ -146,9 +146,50 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         for (String line : shops.diagnose()) {
             sender.sendMessage(alerts.component("&7商店 &f" + line));
         }
+        diagnoseLootKeys(sender);
         sender.sendMessage(alerts.component("&7世界: &f" + config.settings().world()
                 + " &7奖励箱: &f" + config.settings().loot().chestLocations().size()
                 + " &7内容行: &f" + config.settings().loot().lootGroups().size()));
+    }
+
+    /**
+     * 核对奖励箱与钓竿配置里的附魔键是否在本服注册表里存在。
+     *
+     * <p>自定义附魔（数据包或附魔插件提供）无法在编译期验证；未注册的键在开局时
+     * 只会被跳过并写 WARNING，因此提前在这里报出来，避免"箱子开出来是空的"这类现象
+     * 到游戏中才发现。</p>
+     */
+    private void diagnoseLootKeys(CommandSender sender) {
+        java.util.Set<String> configured = new java.util.LinkedHashSet<>();
+        for (java.util.List<String> group : config.settings().loot().lootGroups()) {
+            for (String raw : group) {
+                configured.addAll(cn.mgtown.fmwar.config.LootParser.rawEnchantmentKeys(raw));
+            }
+        }
+        configured.addAll(config.settings().start().rodEnchantments().keySet());
+
+        if (configured.isEmpty()) {
+            return;
+        }
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        for (String keyText : configured) {
+            String normalized = keyText.contains(":") ? keyText : "minecraft:" + keyText;
+            org.bukkit.NamespacedKey key;
+            try {
+                key = org.bukkit.NamespacedKey.fromString(normalized.toLowerCase(java.util.Locale.ROOT));
+            } catch (RuntimeException exception) {
+                key = null;
+            }
+            if (key == null || org.bukkit.Registry.ENCHANTMENT.get(key) == null) {
+                missing.add(keyText);
+            }
+        }
+        sender.sendMessage(alerts.component("&7附魔键: &f共 " + configured.size() + " 个，"
+                + "&a可用 " + (configured.size() - missing.size()) + "&7 / &c缺失 " + missing.size()));
+        for (String keyText : missing) {
+            sender.sendMessage(alerts.component("&c - 未注册: &f" + keyText
+                    + " &7(需要数据包或附魔插件提供)"));
+        }
     }
 
     @Override

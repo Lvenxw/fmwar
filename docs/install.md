@@ -23,7 +23,7 @@ FMWar 的玩法代码本身自包含，但有几项条件**只有在真实服务
 | --- | --- | --- | --- |
 | 1 | 世界名与 `config.yml` 的 `world` 一致 | 服务器 `level-name` | 控制台报世界未加载；`/fmwar doctor` 列出 |
 | 2 | 六个 eshop 商店已定义并摆放在场地内 | `/fmwar doctor` 看 `defined=true`；或 `/eshop` 检查 | 商店不出现，其余玩法正常 |
-| 3 | 奖励箱 20 种附魔键在本服注册表里存在 | 开关一次箱子看物品附魔 | 控制台 WARNING + 该条被跳过 |
+| 3 | 奖励箱与钓竿的附魔键在本服注册表里存在 | **`/fmwar doctor` 会直接列出未注册的键** | 控制台 WARNING + 该条被跳过，箱子少物品 |
 | 4 | Residence 的 FM 领地对普通玩家关闭 `tp` | `/res set FM tp false` | 玩家可自行传进场地 |
 | 5 | 没有其它插件的侧栏与之冲突 | 看是否有等级榜/经济榜侧栏 | 本插件不改主计分板，冲突风险低 |
 | 6 | 坐姿类插件（如 GSit）的躺/坐/趴需要额外拦截 | 观察玩家能否坐下 | 本插件只拦骑乘（潜行拦截可用 `start.block-sneak` 打开）；坐姿需另接该插件 API |
@@ -38,7 +38,7 @@ FMWar 的玩法代码本身自包含，但有几项条件**只有在真实服务
 | `/fmwar start` | `fmwar.admin` | 跳过准备按钮，把准备房间内已入队玩家直接拉入对局 |
 | `/fmwar stop` | `fmwar.admin` | 强制中止并清场（清背包、还原队伍与计分板、移除奖励箱、despawn 商店） |
 | `/fmwar status` | `fmwar.admin` | 阶段、队列人数、名单人数、场地内存活、剩余时间、自己的队伍 |
-| `/fmwar doctor` | `fmwar.admin` | 配置校验结果 + 每个 shopId 的 `defined/spawned` |
+| `/fmwar doctor` | `fmwar.admin` | 配置校验结果 + 每个 shopId 的 `defined/spawned` + **奖励箱/钓竿里每个附魔键在本服注册表里是否存在**（未注册的键会逐个列出） |
 
 ## 5. 外部行为边界
 
