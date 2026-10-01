@@ -466,6 +466,40 @@ public final class ConfigManager {
                 problems.add(new Spec.Problem("locations." + key + ".world", "世界未加载: " + position.world()));
             }
         }
+
+        // 世界一致性：本插件的区域/传送点/按钮/奖励箱都只在同一个世界里生效。
+        // 若某项自带的 world 与顶层 world 不一致，全部判定会静默失效（点按钮没反应、
+        // 进场地被判离场、传送失效），这类故障排查起来极费劲，因此加载期就报出来。
+        for (Map.Entry<String, Region> entry : regions.entrySet()) {
+            if (missingRequired.contains("regions." + entry.getKey())) {
+                continue;
+            }
+            if (!entry.getValue().world().equals(parsed.world())) {
+                problems.add(new Spec.Problem("regions." + entry.getKey() + ".world",
+                        "与顶层 world(" + parsed.world() + ") 不一致: " + entry.getValue().world()
+                                + " —— 跨世界配置会让该区域的所有判定失效"));
+            }
+        }
+        for (Map.Entry<String, Position> entry : locations.entrySet()) {
+            if (missingRequired.contains("locations." + entry.getKey())) {
+                continue;
+            }
+            if (!entry.getValue().world().equals(parsed.world())) {
+                problems.add(new Spec.Problem("locations." + entry.getKey() + ".world",
+                        "与顶层 world(" + parsed.world() + ") 不一致: " + entry.getValue().world()
+                                + " —— 该传送点不会被使用"));
+            }
+        }
+        // 奖励箱坐标不带键名，逐个按序号报告
+        List<Position> chestLocations = parsed.loot().chestLocations();
+        for (int index = 0; index < chestLocations.size(); index++) {
+            Position chest = chestLocations.get(index);
+            if (!chest.world().equals(parsed.world())) {
+                problems.add(new Spec.Problem("chests.locations[" + index + "]",
+                        "所在世界 " + chest.world() + " 与顶层 world(" + parsed.world()
+                                + ") 不一致 —— 该奖励箱不会生成"));
+            }
+        }
         for (String key : REQUIRED_BUTTONS) {
             if (missingRequired.contains("buttons." + key)) {
                 problems.add(new Spec.Problem("buttons." + key, "缺失（按钮不会响应）"));

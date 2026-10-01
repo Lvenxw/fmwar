@@ -21,7 +21,7 @@ FMWar 的玩法代码本身自包含，但有几项条件**只有在真实服务
 
 | # | 条件 | 怎么确认 | 不满足时的表现 |
 | --- | --- | --- | --- |
-| 1 | 世界名与 `config.yml` 的 `world` 一致 | 服务器 `level-name` | 控制台报世界未加载；`/fmwar doctor` 列出 |
+| 1 | 世界名与 `config.yml` 的 `world` 一致 | 服务器 `level-name`；启动日志会报告"游戏世界 X 已就绪"或报错 | 控制台报世界未加载；`/fmwar doctor` 列出。**若世界存在但里面没有玩家，插件也会 WARN 提醒你核对世界名** |
 | 2 | 六个 eshop 商店已定义并摆放在场地内 | `/fmwar doctor` 看 `defined=true`；或 `/eshop` 检查 | 商店不出现，其余玩法正常 |
 | 3 | 奖励箱与钓竿的附魔键在本服注册表里存在 | **`/fmwar doctor` 会直接列出未注册的键** | 控制台 WARNING + 该条被跳过，箱子少物品 |
 | 4 | Residence 的 FM 领地对普通玩家关闭 `tp` | `/res set FM tp false` | 玩家可自行传进场地 |

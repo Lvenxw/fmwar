@@ -75,6 +75,7 @@ public final class FMWar extends JavaPlugin {
 
         engine.onEnable();
         reportShopReadiness();
+        reportWorldReadiness();
 
         var validation = configManager.validation();
         if (!validation.ok()) {
@@ -115,6 +116,30 @@ public final class FMWar extends JavaPlugin {
             getLogger().warning("以下商店未在本服定义，开局时不会生成：" + String.join(", ", missing)
                     + " —— 请用 /eshop 配置，或 /fmwar doctor 查看逐项状态"
                     + "；不需要商店时可在 config.yml 设置 extra-shops.enabled=false");
+        }
+    }
+
+    /**
+     * 启动时确认游戏世界用对了。
+     *
+     * <p>世界名写错是**最难排查的一类配置错误**：插件不会崩，但区域判定、按钮命中、
+     * 传送全部静默失效（点按钮没反应、进场地被判离场）。因此这里主动报告世界是否
+     * 存在、里面有没有人，让这类错误在启动日志里就暴露。</p>
+     */
+    private void reportWorldReadiness() {
+        String configured = configManager.settings().world();
+        var world = getServer().getWorld(configured);
+        if (world == null) {
+            getLogger().severe("游戏世界 " + configured + " 未加载！本插件的区域判定、按钮与传送都不会生效。"
+                    + "请把 config.yml 的 world 改成服务器上实际的世界名后 /fmwar reload");
+            return;
+        }
+        int players = world.getPlayers().size();
+        if (players == 0) {
+            getLogger().warning("游戏世界 " + configured + " 当前没有玩家。若你的游戏场地其实在别的世界，"
+                    + "玩家会看不到任何按钮响应 —— 请核对 config.yml 的 world");
+        } else {
+            getLogger().info("游戏世界 " + configured + " 已就绪（当前 " + players + " 名玩家）");
         }
     }
 }
