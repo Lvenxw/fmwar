@@ -48,9 +48,11 @@ public final class TeleportGuardListener implements Listener {
         if (!insideProtectedRegions(to)) {
             return;
         }
-        // 已经位于受保护区域内的玩家在区域内/区域间移动：放行，
-        // 否则管理员与其它插件在大厅、准备房间内的正常传送（包括死亡重生）会被无谓取消
-        if (from != null && insideProtectedRegions(from)) {
+        // 场内位移放行：只放行“起点与终点都在同一个保护区内”的情况（日常走动/重生）。
+        // 刻意不放行“保护区内 → 另一个保护区内”：需求第 27 行要求玩家在领地内也不能互相传送，
+        // 而领地 FM 覆盖大厅与准备房间，跨区传送正是要禁止的那类行为。
+        // 本插件自己的传送带 teleportBypass 标记，在方法开头就放行了，不受这条影响。
+        if (from != null && sameRegion(from, to)) {
             return;
         }
         event.setCancelled(true);
@@ -61,6 +63,17 @@ public final class TeleportGuardListener implements Listener {
                 || inside(location, "prep-room")
                 || inside(location, "hall")
                 || inside(location, "duel-1");
+    }
+
+    /** 两个位置是否落在同一个受保护区域内。 */
+    private boolean sameRegion(Location from, Location to) {
+        for (String key : new String[]{"arena", "prep-room", "hall", "duel-1"}) {
+            var region = config.settings().optionalRegion(key);
+            if (region != null && region.contains(from) && region.contains(to)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean inside(Location location, String regionKey) {

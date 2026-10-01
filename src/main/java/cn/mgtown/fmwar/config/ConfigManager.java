@@ -30,6 +30,25 @@ public final class ConfigManager {
     private static final List<String> REQUIRED_BUTTONS =
             List.of("join", "prepare", "back-to-hall", "spectator");
 
+    /**
+     * 必须在服主自己的 config.yml 里出现的路径。
+     *
+     * <p>这些项若只靠 jar 内置 defaults 补齐，说明文件被清空或截断——此时宁可拒绝加载，
+     * 也不能把服主的配置悄悄换成默认值。</p>
+     */
+    private static final List<String> CRITICAL_PATHS = List.of(
+            "world",
+            "regions.arena.min", "regions.arena.max",
+            "regions.notify.min", "regions.notify.max",
+            "regions.prep-room.min", "regions.prep-room.max",
+            "regions.hall.min", "regions.hall.max",
+            "regions.duel-1.min", "regions.duel-1.max",
+            "locations.arena-spawn.point", "locations.prep-spawn.point", "locations.hall-spawn.point",
+            "buttons.join.block", "buttons.prepare.block", "buttons.back-to-hall.block", "buttons.spectator.block",
+            "timing.game-duration", "timing.prepare-clicks",
+            "chests.locations", "chests.loot-groups",
+            "extra-shops.ids");
+
     private final FMWar plugin;
     private final File file;
     private final LootParser lootParser;
@@ -71,7 +90,7 @@ public final class ConfigManager {
                         java.nio.charset.StandardCharsets.UTF_8)));
 
         Settings parsed = parse(yaml);
-        Spec.Validation checked = validate(parsed);
+        Spec.Validation checked = validate(yaml, parsed);
         if (!checked.ok()) {
             // 校验不通过时保留上一份可用配置：reload 写坏了 YAML 不应该让进行中的对局
             // 立刻切到半残配置（例如区域被占位成 0,0,0）
@@ -317,10 +336,20 @@ public final class ConfigManager {
     // 校验
     // ------------------------------------------------------------------
 
-    private Spec.Validation validate(Settings parsed) {
+    private Spec.Validation validate(FileConfiguration yaml, Settings parsed) {
         List<Spec.Problem> problems = new ArrayList<>();
         Map<String, Region> regions = new LinkedHashMap<>(parsed.regions());
         Map<String, Position> locations = new LinkedHashMap<>(parsed.locations());
+
+        // 关键项必须在**服主自己的文件**里存在，否则视为损坏配置。
+        // 原因：Bukkit 读取配置时会回退到 jar 内置的 defaults，一份被写成空文件或被
+        // 截断的 config.yml 会被 defaults 补全并通过所有数值校验，从而把服主原来的
+        // 配置悄悄替换成默认值。isSet 不查 defaults，能识别出这种情况。
+        for (String path : CRITICAL_PATHS) {
+            if (!yaml.isSet(path)) {
+                problems.add(new Spec.Problem(path, "配置文件缺少该项（可能被清空或截断），已拒绝加载以保留上一份可用配置"));
+            }
+        }
 
         for (String key : REQUIRED_REGIONS) {
             if (missingRequired.contains("regions." + key)) {

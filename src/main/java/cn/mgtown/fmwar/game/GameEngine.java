@@ -92,6 +92,18 @@ public final class GameEngine {
     private final Map<UUID, Long> outsiderCooldown = new HashMap<>();
     private static final long OUTSIDER_COOLDOWN_TICKS = 100L;
 
+    /** 被本插件淘汰、等待主动重生的玩家：只有这些人的重生点会被改写为大厅。 */
+    private final Set<UUID> pendingRespawn = new HashSet<>();
+    /** 刚被淘汰的玩家 → 豁免截止 tick：避免其被“无关玩家清场”逻辑二次传送与误提示。 */
+    private final Map<UUID, Long> recentEliminations = new HashMap<>();
+    private static final long ELIMINATION_GRACE_TICKS = 100L;
+    /** 对局中掉线的参战者：重新上线时按需求 108 送回大厅。 */
+    private final Set<UUID> disconnectedMembers = new HashSet<>();
+    /** 对局中掉线的观战者：重新上线时仍为观战（需求 104），对局结束后回大厅。 */
+    private final Set<UUID> disconnectedSpectators = new HashSet<>();
+    /** 准备房间内掉线的入队玩家：重新上线时传送至大厅（需求 39）。 */
+    private final Set<UUID> disconnectedPreppers = new HashSet<>();
+
     /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
     private boolean ended;
 
@@ -164,12 +176,15 @@ public final class GameEngine {
         forceCleanup();
     }
 
-    /** /fmwar reload 之后重新解析世界引用。 */
+    /** /fmwar reload 之后重新解析世界引用并重跑区块预加载。 */
     public void onReload() {
         World resolved = resolveWorld();
-        if (resolved != null) {
-            this.world = resolved;
+        if (resolved == null) {
+            plugin.getLogger().warning("reload 后世界仍不可用，玩法的传送与奖励箱不会生效");
+            return;
         }
+        this.world = resolved;
+        preloadChunks();
     }
 
     /**
@@ -266,7 +281,6 @@ public final class GameEngine {
             lastEmeraldSecond = elapsedSeconds;
             giveEmeralds();
         }
-
         // 4) 倒计时归零：每秒扣血
         if (remainingTicks <= 0) {
             long overtime = (-remainingTicks) / 20L;
@@ -276,10 +290,30 @@ public final class GameEngine {
             }
         }
 
-        // 5) 周期性复核：存活人数跌破两人时放弃本局（正常情况下 checkVictory 会先结束对局）
+        // 5) 周期性复核兜底：存活人数跌破两人时结束本局。
+        //    正常路径由 eliminate → checkVictory 提前收尾；这里只处理“扣血致死那一步
+        //    就发生在本次 tick、checkVictory 的任务又排在引擎之后”的时序，因此必须
+        //    自己完成播报，否则玩家只会看到一句“游戏结束”而不知道结果。
         if (elapsedTicks % 80L == 0L && alive < 2) {
-            endGame();
+            settleFromRoster();
         }
+    }
+
+    /** 按当前名单直接判定结果并结束对局（兜底路径，保证与 checkVictory 播报一致）。 */
+    private void settleFromRoster() {
+        if (ended || phase != GamePhase.RUNNING) {
+            return;
+        }
+        ended = true;
+        List<Player> alive = onlineMembers();
+        if (alive.size() == 1) {
+            Player winner = alive.get(0);
+            alerts.broadcast("win", Map.of("player", winner.getName()));
+            eliminate(winner, null, false);
+        } else {
+            alerts.broadcast("no-survivor", Map.of());
+        }
+        endGame();
     }
 
     private void tickEnding(long now) {
@@ -755,6 +789,15 @@ public final class GameEngine {
                     || settings.region("prep-room").contains(player.getLocation())) {
                 continue;
             }
+            // 刚被淘汰/刚重生完的玩家不算“无关玩家”：否则会额外收到 arena-forbidden
+            // 并被重复传送一次，提示与需求 106 的“离开了游戏”相冲突
+            Long grace = recentEliminations.get(uuid);
+            if (grace != null) {
+                if (Bukkit.getCurrentTick() < grace) {
+                    continue;
+                }
+                recentEliminations.remove(uuid);
+            }
             // 冷却 + 目标在受保护区域内：即使某次传送被领地守卫取消，也不会形成每 tick 重传的循环
             long now = Bukkit.getCurrentTick();
             Long until = outsiderCooldown.get(uuid);
@@ -773,11 +816,13 @@ public final class GameEngine {
     }
 
     /**
-     * 淘汰一名游戏内玩家：清背包、清效果、移出队伍、送回大厅并广播。
+     * 淘汰一名游戏内玩家。
      *
-     * @param respawn 是否需要在下一 tick 主动把玩家从死亡界面拉回来（只有死亡路径需要）
+     * @param deferredRespawn true 表示这次淘汰由死亡触发，需要在下一 tick 主动把玩家
+     *                        从死亡界面拉回来（并在此期间把它登记进“待重生名单”，
+     *                        使重生点监听只影响本插件淘汰的玩家）
      */
-    public void eliminate(Player player, String messageKey, boolean broadcast, boolean respawn) {
+    public void eliminate(Player player, String messageKey, boolean broadcast, boolean deferredRespawn) {
         UUID uuid = player.getUniqueId();
         if (!members.remove(uuid)) {
             return;
@@ -785,9 +830,14 @@ public final class GameEngine {
         clearPlayerState(player);
         teams.leaveAll(uuid);
         scoreboard.detach(player);
+        recentEliminations.put(uuid, Bukkit.getCurrentTick() + ELIMINATION_GRACE_TICKS);
+        if (deferredRespawn) {
+            // 先登记再传送：PlayerRespawnEvent 触发时才知道“这是被本插件淘汰的人”
+            pendingRespawn.add(uuid);
+        }
         // 传送豁免：淘汰后的传送可能落到领地内，必须保证成功
         teleport(player, config.settings().locationOrNull("hall-spawn"), true);
-        if (respawn) {
+        if (deferredRespawn) {
             scheduleRespawn(player);
         }
         if (messageKey != null && !messageKey.isEmpty()) {
@@ -803,15 +853,24 @@ public final class GameEngine {
     }
 
     /**
+     * 该玩家是否正处于“被本插件淘汰、等待主动重生”的窗口内。
+     *
+     * <p>只有窗口内的玩家才会被 {@code PlayerStateListener} 改写重生点——
+     * 这样 FMWar 绝不会影响服务器上其他玩家的死亡重生位置。</p>
+     */
+    public boolean consumePendingRespawn(UUID uuid) {
+        return pendingRespawn.remove(uuid);
+    }
+
+    /**
      * 死亡淘汰后把玩家从死亡界面拉回来，并确保落点是大厅。
      *
-     * <p>只在死亡路径调用（{@code respawn=true}）。离场/掉线等路径没有死亡界面，
-     * 若也调用 respawn 会被服务器重生点覆盖掉刚刚的大厅传送。
-     * 主动重生会触发 {@link org.bukkit.event.player.PlayerRespawnEvent}，
-     * 由 {@code PlayerStateListener} 把重生点设成大厅。</p>
+     * <p>只有死亡路径会调用它。离场/掉线等路径没有死亡界面，若也调用 respawn，
+     * 最终落点会被服务器重生点覆盖掉刚刚的大厅传送。</p>
      */
     private void scheduleRespawn(Player player) {
         Bukkit.getScheduler().runTask(plugin, () -> {
+            pendingRespawn.remove(player.getUniqueId());
             if (!player.isOnline()) {
                 return;
             }
@@ -885,9 +944,8 @@ public final class GameEngine {
     /**
      * 玩家掉线。
      *
-     * <p>需求 108：参战者掉线即视为离开游戏——当场清空背包与药水效果、移出队伍；
-     * 之后重新上线时因为已不在队伍里，会走“对局已结束/已离开”的分支被送回大厅，
-     * 而不会被误判成观战者。</p>
+     * <p>需求 108：参战者掉线即视为离开游戏——当场清空背包与药水效果、移出队伍，
+     * 并记入“掉线待处理”名单，上线时按需求送回大厅（而不是留在场地或误判成观战者）。</p>
      */
     public void onQuit(Player player) {
         UUID uuid = player.getUniqueId();
@@ -897,11 +955,18 @@ public final class GameEngine {
             }
             teams.leaveAll(uuid);
             scoreboard.detach(player);
+            disconnectedMembers.add(uuid);
             alerts.broadcast("quit", Map.of("player", player.getName()));
             checkVictory();
+        } else if (teams.inSpectatorTeam(uuid)) {
+            // 观战者掉线：对局中保留观战身份（需求 104），上线时回到观战点
+            disconnectedSpectators.add(uuid);
         }
-        queue.remove(uuid);
-        // 掉线者下一 tick 起不在准备房间内，主动从名单里摘掉，避免上线时被误传回大厅
+        if (queue.remove(uuid)) {
+            // 需求 39 后半：准备房间内掉线同样退出队列，上线时传送至大厅
+            disconnectedPreppers.add(uuid);
+        }
+        // 掉线者下一 tick 起不在准备房间内，同步名单避免被当成“仍在房间内”
         Set<UUID> current = new HashSet<>(prepRoster);
         current.remove(uuid);
         prepRoster = current;
@@ -910,6 +975,35 @@ public final class GameEngine {
     /** 玩家上线。 */
     public void onJoin(Player player) {
         UUID uuid = player.getUniqueId();
+        // 需求 108：对局中掉线的参战者重新上线——清空背包与药水效果、移出队伍、传送至大厅
+        if (disconnectedMembers.remove(uuid)) {
+            teams.leaveAll(uuid);
+            scoreboard.detach(player);
+            player.setGameMode(GameMode.SURVIVAL);
+            teleport(player, config.settings().location("hall-spawn"));
+            alerts.sendTo(player, "player-arena-exit", Map.of("player", player.getName()));
+            return;
+        }
+        // 需求 104：对局中掉线的观战者重新上线仍为观战模式、仍在队伍 fmgz
+        if (disconnectedSpectators.remove(uuid)) {
+            if (phase == GamePhase.RUNNING) {
+                player.setGameMode(GameMode.SPECTATOR);
+                scoreboard.attach(player, config.settings());
+                teleport(player, config.settings().location("arena-spawn"));
+            } else {
+                teams.leaveAll(uuid);
+                scoreboard.detach(player);
+                player.setGameMode(GameMode.SURVIVAL);
+                teleport(player, config.settings().location("hall-spawn"));
+            }
+            return;
+        }
+        // 需求 39：准备房间内掉线的玩家重新上线——传送至大厅
+        if (disconnectedPreppers.remove(uuid)) {
+            teleport(player, config.settings().location("hall-spawn"));
+            return;
+        }
+
         if (phase == GamePhase.RUNNING) {
             if (members.contains(uuid)) {
                 // 名单里仍有此人（例如跨 tick 的边界情况）：按观战处理，不再回到对局
@@ -931,14 +1025,6 @@ public final class GameEngine {
             teams.leaveAll(uuid);
             scoreboard.detach(player);
             player.setGameMode(GameMode.SURVIVAL);
-            teleport(player, config.settings().location("hall-spawn"));
-            return;
-        }
-        if (queue.contains(uuid)) {
-            return;
-        }
-        if (prepRoster.contains(uuid)) {
-            // 准备房间内掉线的玩家已在 onQuit 退出队列，上线时回大厅
             teleport(player, config.settings().location("hall-spawn"));
         }
     }
@@ -1039,14 +1125,7 @@ public final class GameEngine {
         clearArenaEntities();
         shops.despawnAll();
         scoreboard.detachAll();
-        members.clear();
-        queue.clear();
-        outsiderCooldown.clear();
-        prepareClicks = 0;
-        prepRoster = Set.of();
-        timer = null;
-        ended = false;
-        phase = GamePhase.IDLE;
+        resetRuntimeState();
         alerts.broadcast("game-over", Map.of());
     }
 
@@ -1068,10 +1147,33 @@ public final class GameEngine {
         clearArenaEntities();
         shops.despawnAll();
         scoreboard.detachAll();
+        resetRuntimeState();
+    }
+
+    /**
+     * 清空全部运行期状态。
+     *
+     * <p>两条清理路径（正常结算 {@code finishGame} 与停用兜底 {@code forceCleanup}）
+     * 共用一份实现，避免漏清某个集合——此前的“漏清冷却表 / 漏清背包快照”正是这么来的。</p>
+     */
+    private void resetRuntimeState() {
         members.clear();
         queue.clear();
-        prepareClicks = 0;
         prepRoster = Set.of();
+        outsiderCooldown.clear();
+        recentEliminations.clear();
+        pendingRespawn.clear();
+        disconnectedMembers.clear();
+        disconnectedSpectators.clear();
+        disconnectedPreppers.clear();
+        inventoryBackups.clear();
+        chests.clear();
+        prepareClicks = 0;
+        duelTeleported = false;
+        lastOvertimeSecond = -1L;
+        lastEmeraldSecond = 0L;
+        lastRemainingTicks = Long.MAX_VALUE;
+        lastCountdownSecond = -1L;
         timer = null;
         ended = false;
         phase = GamePhase.IDLE;

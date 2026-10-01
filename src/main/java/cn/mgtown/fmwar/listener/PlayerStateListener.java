@@ -48,13 +48,17 @@ public final class PlayerStateListener implements Listener {
         engine.eliminate(player, "death", true, true);
     }
 
-    /** 死亡重生点设为大厅，避免主动重生后落在服务器默认出生点。 */
+    /**
+     * 被本插件淘汰的玩家在主动重生时落点应为大厅。
+     *
+     * <p>关键约束：FMWar **绝不能**影响服务器上其他玩家的重生位置。因此这里只对
+     * “刚被淘汰、正在等待重生”的玩家（由 {@link GameEngine#consumePendingRespawn} 判定）
+     * 改写落点，其余一律不碰。</p>
+     */
     @EventHandler(priority = EventPriority.HIGH)
     public void onRespawn(PlayerRespawnEvent event) {
-        if (!engine.isActive()) {
-            return;
-        }
-        if (engine.isMember(event.getPlayer().getUniqueId())) {
+        Player player = event.getPlayer();
+        if (!engine.consumePendingRespawn(player.getUniqueId())) {
             return;
         }
         org.bukkit.Location hall = engine.hallLocation();

@@ -2,6 +2,7 @@ package cn.mgtown.fmwar.command;
 
 import cn.mgtown.FMWar;
 import cn.mgtown.fmwar.game.GameEngine;
+import cn.mgtown.fmwar.game.GamePhase;
 import cn.mgtown.fmwar.service.AlertService;
 import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.ShopService;
@@ -14,14 +15,20 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * {@code /fmwar} 指令：reload / start / stop / status / doctor。
  *
  * <p>权限：{@code fmwar.admin}（默认 op）。玩家侧只需要 {@code fmwar.play}（默认所有人），
  * 那条权限只用于按钮点击的预检查，不用在指令上。</p>
+ *
+ * <p>所有回显文案都取自 {@code messages.command-*} / {@code messages.status-*} /
+ * {@code messages.doctor-*}，改配置即可改字，代码里不出现玩家可见的硬编码文案。</p>
  */
 public final class CommandHandler implements CommandExecutor, TabCompleter {
 
@@ -54,102 +61,105 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             sender.sendMessage(alerts.component(alerts.render("no-permission", Map.of())));
             return true;
         }
-        String sub = args[0].toLowerCase(java.util.Locale.ROOT);
-        switch (sub) {
+        switch (args[0].toLowerCase(Locale.ROOT)) {
             case "reload" -> reload(sender);
             case "start" -> start(sender);
             case "stop" -> stop(sender);
             case "status" -> status(sender);
-            case "doctor" -> doctor(sender);
+            case "doctor" -> doctor(sender, label);
             default -> usage(sender, label);
         }
         return true;
     }
 
+    /** 按配置文案回显一行。 */
+    private void line(CommandSender sender, String key, Map<String, String> placeholders) {
+        sender.sendMessage(alerts.component(alerts.render(key, placeholders)));
+    }
+
     private void usage(CommandSender sender, String label) {
-        sender.sendMessage(alerts.component("&6附魔战争指令："));
-        sender.sendMessage(alerts.component("&e/" + label + " reload &7- 重新加载 config.yml"));
-        sender.sendMessage(alerts.component("&e/" + label + " start &7- 立即开始一局（跳过准备按钮）"));
-        sender.sendMessage(alerts.component("&e/" + label + " stop &7- 强制中止当前对局并清场"));
-        sender.sendMessage(alerts.component("&e/" + label + " status &7- 查看当前状态"));
-        sender.sendMessage(alerts.component("&e/" + label + " doctor &7- 自检配置与 ExtraShop 集成"));
+        line(sender, "command-usage-title", Map.of());
+        for (String sub : SUBCOMMANDS) {
+            line(sender, "command-usage-" + sub, Map.of("label", label));
+        }
     }
 
     private void reload(CommandSender sender) {
         boolean ok = config.reload();
         engine.onReload();
         shops.refresh();
-        if (ok) {
-            sender.sendMessage(alerts.component(alerts.render("reload-ok", Map.of())));
-        } else {
-            sender.sendMessage(alerts.component(alerts.render("reload-failed", Map.of())));
-        }
+        line(sender, "command-reload-ok", Map.of());
         var validation = config.manager().validation();
         if (!validation.ok()) {
-            sender.sendMessage(alerts.component("&c配置存在 " + validation.problems().size() + " 个问题："));
+            line(sender, "command-reload-problems",
+                    Map.of("count", Integer.toString(validation.problems().size())));
             for (var problem : validation.problems()) {
                 sender.sendMessage(alerts.component("&7 - &f" + problem.path() + " &7" + problem.detail()));
             }
+        } else if (!ok) {
+            // 理论上不会走到：ok=false 必然伴随校验问题
+            plugin.getLogger().warning("/fmwar reload 返回失败但校验无问题，请查看控制台日志");
         }
     }
 
     private void start(CommandSender sender) {
         if (engine.isRunning()) {
-            sender.sendMessage(alerts.component("&c当前已有进行中的对局"));
+            line(sender, "command-start-running", Map.of());
             return;
         }
         int participants = engine.prepareFromQueue();
         if (participants < 2) {
-            sender.sendMessage(alerts.component("&c准备房间内至少需要两名已入队玩家，当前 " + participants + " 名"));
+            line(sender, "command-start-need-two", Map.of("count", Integer.toString(participants)));
             return;
         }
-        sender.sendMessage(alerts.component("&a已强制开始对局，参战 " + participants + " 名玩家"));
+        line(sender, "command-start-ok", Map.of("count", Integer.toString(participants)));
     }
 
     private void stop(CommandSender sender) {
-        if (engine.phase() == cn.mgtown.fmwar.game.GamePhase.IDLE) {
-            sender.sendMessage(alerts.component("&7当前没有进行中的对局"));
+        if (engine.phase() == GamePhase.IDLE) {
+            line(sender, "command-stop-idle", Map.of());
             return;
         }
         engine.requestEnd();
-        sender.sendMessage(alerts.component("&a已中止对局，正在清场"));
+        line(sender, "command-stop-ok", Map.of());
     }
 
     private void status(CommandSender sender) {
-        sender.sendMessage(alerts.component("&6=== 附魔战争状态 ==="));
-        sender.sendMessage(alerts.component("&7阶段: &f" + engine.phase()));
-        sender.sendMessage(alerts.component("&7队列人数: &f" + engine.queue().size()));
-        sender.sendMessage(alerts.component("&7对局内玩家: &f" + engine.memberCount()));
-        sender.sendMessage(alerts.component("&7场地内存活: &f" + engine.aliveCount()));
-        sender.sendMessage(alerts.component("&7队伍: &f" + teams.describe()));
-        if (engine.phase() != cn.mgtown.fmwar.game.GamePhase.IDLE) {
-            sender.sendMessage(alerts.component("&7剩余时间: &f" + TimeUtil.mmss(engine.remainingTicks())));
+        line(sender, "status-title", Map.of());
+        line(sender, "status-phase", Map.of("phase", engine.phase().name()));
+        line(sender, "status-queue", Map.of("count", Integer.toString(engine.queue().size())));
+        line(sender, "status-roster", Map.of("count", Integer.toString(engine.memberCount())));
+        line(sender, "status-alive", Map.of("count", Integer.toString(engine.aliveCount())));
+        line(sender, "status-teams", Map.of("teams", teams.describe()));
+        if (engine.phase() != GamePhase.IDLE) {
+            line(sender, "status-remaining", Map.of("time", TimeUtil.mmss(engine.remainingTicks())));
         }
         if (sender instanceof Player player) {
-            sender.sendMessage(alerts.component("&7你的队伍: &f"
-                    + (teams.inPlayerTeam(player.getUniqueId()) ? config.settings().teams().player()
+            String team = teams.inPlayerTeam(player.getUniqueId()) ? config.settings().teams().player()
                     : teams.inSpectatorTeam(player.getUniqueId()) ? config.settings().teams().spectator()
-                    : "无")));
+                    : alerts.render("status-team-none", Map.of());
+            line(sender, "status-self-team", Map.of("team", team));
         }
     }
 
-    private void doctor(CommandSender sender) {
-        sender.sendMessage(alerts.component("&6=== 附魔战争自检 ==="));
+    private void doctor(CommandSender sender, String label) {
+        line(sender, "doctor-title", Map.of());
         var validation = config.manager().validation();
         if (validation.ok()) {
-            sender.sendMessage(alerts.component("&a配置校验通过"));
+            line(sender, "doctor-config-ok", Map.of());
         } else {
             for (var problem : validation.problems()) {
                 sender.sendMessage(alerts.component("&c - &f" + problem.path() + " &7" + problem.detail()));
             }
         }
-        for (String line : shops.diagnose()) {
-            sender.sendMessage(alerts.component("&7商店 &f" + line));
+        for (String shopLine : shops.diagnose()) {
+            line(sender, "doctor-shop-line", Map.of("line", shopLine));
         }
         diagnoseLootKeys(sender);
-        sender.sendMessage(alerts.component("&7世界: &f" + config.settings().world()
-                + " &7奖励箱: &f" + config.settings().loot().chestLocations().size()
-                + " &7内容行: &f" + config.settings().loot().lootGroups().size()));
+        line(sender, "doctor-world", Map.of(
+                "world", config.settings().world(),
+                "chests", Integer.toString(config.settings().loot().chestLocations().size()),
+                "groups", Integer.toString(config.settings().loot().lootGroups().size())));
     }
 
     /**
@@ -160,23 +170,23 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
      * 到游戏中才发现。</p>
      */
     private void diagnoseLootKeys(CommandSender sender) {
-        java.util.Set<String> configured = new java.util.LinkedHashSet<>();
-        for (java.util.List<String> group : config.settings().loot().lootGroups()) {
+        Set<String> configured = new LinkedHashSet<>();
+        for (List<String> group : config.settings().loot().lootGroups()) {
             for (String raw : group) {
                 configured.addAll(cn.mgtown.fmwar.config.LootParser.rawEnchantmentKeys(raw));
             }
         }
         configured.addAll(config.settings().start().rodEnchantments().keySet());
-
         if (configured.isEmpty()) {
             return;
         }
-        java.util.List<String> missing = new java.util.ArrayList<>();
+
+        List<String> missing = new ArrayList<>();
         for (String keyText : configured) {
             String normalized = keyText.contains(":") ? keyText : "minecraft:" + keyText;
             org.bukkit.NamespacedKey key;
             try {
-                key = org.bukkit.NamespacedKey.fromString(normalized.toLowerCase(java.util.Locale.ROOT));
+                key = org.bukkit.NamespacedKey.fromString(normalized.toLowerCase(Locale.ROOT));
             } catch (RuntimeException exception) {
                 key = null;
             }
@@ -184,11 +194,12 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
                 missing.add(keyText);
             }
         }
-        sender.sendMessage(alerts.component("&7附魔键: &f共 " + configured.size() + " 个，"
-                + "&a可用 " + (configured.size() - missing.size()) + "&7 / &c缺失 " + missing.size()));
+        line(sender, "doctor-loot-keys", Map.of(
+                "total", Integer.toString(configured.size()),
+                "ok", Integer.toString(configured.size() - missing.size()),
+                "missing", Integer.toString(missing.size())));
         for (String keyText : missing) {
-            sender.sendMessage(alerts.component("&c - 未注册: &f" + keyText
-                    + " &7(需要数据包或附魔插件提供)"));
+            line(sender, "doctor-loot-key-missing", Map.of("key", keyText));
         }
     }
 
@@ -197,7 +208,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         if (args.length == 1) {
             List<String> result = new ArrayList<>();
             for (String sub : SUBCOMMANDS) {
-                if (sub.startsWith(args[0].toLowerCase(java.util.Locale.ROOT))) {
+                if (sub.startsWith(args[0].toLowerCase(Locale.ROOT))) {
                     result.add(sub);
                 }
             }
