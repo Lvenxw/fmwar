@@ -7,7 +7,6 @@ import cn.mgtown.fmwar.game.GameEngine;
 import cn.mgtown.fmwar.listener.ActionGuardListener;
 import cn.mgtown.fmwar.listener.ButtonListener;
 import cn.mgtown.fmwar.listener.PlayerStateListener;
-import cn.mgtown.fmwar.listener.TeleportGuardListener;
 import cn.mgtown.fmwar.service.AlertService;
 import cn.mgtown.fmwar.service.ButtonCapture;
 import cn.mgtown.fmwar.service.ConfigService;
@@ -60,8 +59,6 @@ public final class FMWar extends JavaPlugin {
                 new PlayerStateListener(engine), this);
         getServer().getPluginManager().registerEvents(
                 new ActionGuardListener(configService, alertService), this);
-        getServer().getPluginManager().registerEvents(
-                new TeleportGuardListener(configService, engine), this);
 
         CommandHandler handler = new CommandHandler(
                 this, configService, alertService, engine, teamService, shopService, buttonCapture);

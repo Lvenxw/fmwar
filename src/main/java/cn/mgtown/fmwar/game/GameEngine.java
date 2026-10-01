@@ -48,9 +48,6 @@ import org.bukkit.enchantments.Enchantment;
  */
 public final class GameEngine {
 
-    /** 玩家被本插件传送时的豁免标记，配合 EntityTeleportEvent 放行。 */
-    private final Set<UUID> teleportBypass = new HashSet<>();
-
     /** 每个玩家在入场时的背包快照，用于“死亡/离场后恢复原背包”（可配置）。 */
     private final Map<UUID, ItemStack[]> inventoryBackups = new HashMap<>();
 
@@ -335,41 +332,64 @@ public final class GameEngine {
     // 准备房间
     // ------------------------------------------------------------------
 
+    /** 计算“新进入准备房间”的玩家（规则见 {@link PrepRoom}）。 */
+    public static Set<UUID> entrants(Set<UUID> previous, Set<UUID> current) {
+        return PrepRoom.entrants(previous, current);
+    }
+
     /**
      * 同步准备房间名单，并处理“离开准备房间即退出队列”（需求 39）。
      *
      * <p>这段逻辑每 tick 都跑（含 IDLE 阶段），因此队列成员集合始终等于
      * “已入队且仍在准备房间内”的玩家，准备倒计时的人数判定也用它，而不是队列总数。</p>
+     *
+     * <p><b>准备进度只在“有玩家进入”时清零</b>（需求 37：“期间准备房间范围有玩家进入则重置”）。
+     * 早先的实现在**任何**名单变化时都清零，于是“有人离开”“倒计时结束后名单重新采样”
+     * 这类非进入事件也会把进度打回 0，表现为进度永远停在 1/7。</p>
      */
     private void syncPrepRoster() {
         Set<UUID> current = playersInRegion(config.settings().region("prep-room"));
-        if (current.equals(prepRoster)) {
-            return;
-        }
+        Set<UUID> previous = prepRoster;
+        boolean roomChanged = !current.equals(previous);
         prepRoster = current;
 
-        // 已入队但已不在准备房间内的玩家：退出队列
-        for (UUID uuid : new ArrayList<>(queue)) {
-            if (current.contains(uuid)) {
-                continue;
+        // 只认“新进入”的玩家；离开不算进入，因此不会误清零进度
+        Set<UUID> entered = PrepRoom.entrants(previous, current);
+        if (roomChanged) {
+            // 已入队但已不在准备房间内的玩家：退出队列（需求 39）
+            for (UUID uuid : new ArrayList<>(queue)) {
+                if (current.contains(uuid)) {
+                    continue;
+                }
+                Player player = Bukkit.getPlayer(uuid);
+                queue.remove(uuid);
+                if (player != null) {
+                    alerts.sendTo(player, "queue-left-self", Map.of());
+                    alerts.broadcast("queue-leave", Map.of("player", player.getName()));
+                }
             }
-            Player player = Bukkit.getPlayer(uuid);
-            queue.remove(uuid);
-            if (player != null) {
-                alerts.sendTo(player, "queue-left-self", Map.of());
-                alerts.broadcast("queue-leave", Map.of("player", player.getName()));
+            // 排查用：名单变化时写下“谁新进来”，便于确认进度是被真实进入事件还是
+            // 异常抖动重置的（出问题时开服务端 debug: true 即可看到）
+            if (!entered.isEmpty() && prepareClicks > 0) {
+                plugin.getLogger().fine("准备房间新增玩家 " + entered.size()
+                        + " 名，准备进度由 " + prepareClicks + " 重置为 0");
             }
         }
 
         if (timer != null) {
-            // 倒计时期间准备房间内人数不足两人：退回准备阶段并提示
+            // 倒计时期间准备房间内已入队人数不足两人：退回准备阶段并提示
             if (queuedInRoom() < 2) {
                 timer = null;
                 prepareClicks = 0;
                 lastCountdownSecond = -1L;
                 alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
             }
-        } else if (prepareClicks > 0) {
+            return;
+        }
+
+        // 需求 37：只在“有玩家新进入”时清零准备进度。
+        // 判定本身放在 PrepRoom 里并被断言覆盖——离开与名单不变都不该清零进度。
+        if (PrepRoom.shouldResetProgress(previous, current, prepareClicks)) {
             prepareClicks = 0;
             alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
         }
@@ -407,6 +427,10 @@ public final class GameEngine {
             long countdownTicks = Math.max(1L, settings.timing().prepareCountdownSeconds()) * 20L;
             timer = new Timer(GamePhase.PREPARING, Bukkit.getCurrentTick(), countdownTicks);
             lastCountdownSecond = -1L;
+            // 进入倒计时瞬间立刻取一次名单基准值：这一 tick 的事件回调先于引擎 tick 执行，
+            // 若不刷新，引擎 tick 里的 syncPrepRoster 会把“原本就在房间里的人”当成新进入者，
+            // 于是刚点满的进度立刻被清零、倒计时当 tick 就被取消
+            prepRoster = playersInRegion(settings.region("prep-room"));
             alerts.broadcast("prepare-announce", Map.of());
         }
     }
@@ -852,7 +876,7 @@ public final class GameEngine {
             pendingRespawn.add(uuid);
         }
         // 传送豁免：淘汰后的传送可能落到领地内，必须保证成功
-        teleport(player, config.settings().locationOrNull("hall-spawn"), true);
+        teleport(player, config.settings().location("hall-spawn"));
         if (deferredRespawn) {
             scheduleRespawn(player);
         }
@@ -918,7 +942,7 @@ public final class GameEngine {
                 player.spigot().respawn();
             }
             pendingRespawn.remove(player.getUniqueId());
-            teleport(player, config.settings().locationOrNull("hall-spawn"), true);
+            teleport(player, config.settings().location("hall-spawn"));
         });
     }
 
@@ -1314,7 +1338,13 @@ public final class GameEngine {
     // 工具
     // ------------------------------------------------------------------
 
-    /** 传送并把 UUID 加入豁免集合，供 EntityTeleportEvent 放行。 */
+    /**
+     * 传送到配置里的坐标点。
+     *
+     * <p>插件不做任何传送权限判断：进入各区域的限制**完全交给领地插件（Residence）
+     * 自己的传送权限旗帜**。此前的实现自己拦截了进入保护区的传送，结果连管理员的
+     * {@code /tp} 与 {@code /res tp} 都被拦掉，属于越权——已移除。</p>
+     */
     public void teleport(Player player, Position target) {
         if (target == null) {
             plugin.getLogger().warning("传送目标未配置，玩家 " + player.getName() + " 未被传送");
@@ -1323,40 +1353,13 @@ public final class GameEngine {
         teleport(player, target.toLocation());
     }
 
-    /** 传送（带豁免开关）。 */
-    public void teleport(Player player, Position target, boolean bypass) {
-        if (target == null) {
-            plugin.getLogger().warning("传送目标未配置，玩家 " + player.getName() + " 未被传送");
-            return;
-        }
-        teleport(player, target.toLocation(), bypass);
-    }
-
-    /** 传送并把 UUID 加入豁免集合，供 EntityTeleportEvent 放行。 */
+    /** 传送（目标世界未加载时记录日志并保持原地）。 */
     public void teleport(Player player, Location location) {
-        teleport(player, location, true);
-    }
-
-    /**
-     * 传送。
-     *
-     * @param bypass true 时把该玩家短暂加入传送豁免集合，使领地插件的传送限制不会打断本插件的传送
-     */
-    public void teleport(Player player, Location location, boolean bypass) {
         if (location == null) {
+            plugin.getLogger().warning("传送目标世界未加载，玩家 " + player.getName() + " 未被传送");
             return;
         }
-        if (bypass) {
-            teleportBypass.add(player.getUniqueId());
-            player.teleportAsync(location).whenComplete((result, error) ->
-                    Bukkit.getScheduler().runTask(plugin, () -> teleportBypass.remove(player.getUniqueId())));
-        } else {
-            player.teleportAsync(location);
-        }
-    }
-
-    public boolean isBypassingTeleport(UUID uuid) {
-        return teleportBypass.contains(uuid);
+        player.teleportAsync(location);
     }
 
     private Set<UUID> playersInRegion(Region region) {
