@@ -106,6 +106,78 @@ public final class PointsService {
     }
 
     // ------------------------------------------------------------------
+    // 管理操作（/fmwar points ...）
+    // ------------------------------------------------------------------
+
+    /** 直接设置积分（设为 0 或以下时移除该条目）；返回是否发生了改动。 */
+    public boolean setPoints(UUID uuid, int value) {
+        if (uuid == null) {
+            return false;
+        }
+        if (value <= 0) {
+            boolean removed = points.remove(uuid) != null;
+            if (removed) {
+                dirty = true;
+            }
+            return removed;
+        }
+        Integer previous = points.put(uuid, value);
+        dirty = true;
+        return previous == null || previous != value;
+    }
+
+    /** 增减积分（可为负）；返回改动后的分值。 */
+    public int adjustPoints(UUID uuid, int delta) {
+        int updated = Math.max(0, points.getOrDefault(uuid, 0) + delta);
+        setPoints(uuid, updated);
+        return updated;
+    }
+
+    /** 移除一名玩家的积分记录；返回是否确实删除了内容。 */
+    public boolean remove(UUID uuid) {
+        boolean removedPoints = points.remove(uuid) != null;
+        boolean removedName = names.remove(uuid) != null;
+        if (removedPoints || removedName) {
+            dirty = true;
+        }
+        return removedPoints;
+    }
+
+    /** 按玩家名查找（不区分大小写）；找不到返回 null。 */
+    public UUID findByName(String name) {
+        if (name == null) {
+            return null;
+        }
+        for (Map.Entry<UUID, String> entry : names.entrySet()) {
+            if (entry.getValue() != null && entry.getValue().equalsIgnoreCase(name)) {
+                return entry.getKey();
+            }
+        }
+        return null;
+    }
+
+    /** 清空全部积分；返回清掉的条目数。 */
+    public int clearAll() {
+        int size = points.size();
+        points.clear();
+        names.clear();
+        if (size > 0) {
+            dirty = true;
+        }
+        return size;
+    }
+
+    /** 参与排名的人数。 */
+    public int size() {
+        return points.size();
+    }
+
+    /** 已记录的玩家名；没有记录时返回 null。 */
+    public String nameOf(UUID uuid) {
+        return uuid == null ? null : names.get(uuid);
+    }
+
+    // ------------------------------------------------------------------
     // 落盘
     // ------------------------------------------------------------------
 

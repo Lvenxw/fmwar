@@ -10,6 +10,7 @@ import cn.mgtown.fmwar.service.PointsService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
 import cn.mgtown.fmwar.util.TimeUtil;
+import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * {@code /fmwar} 指令：reload / start / stop / status / doctor。
@@ -76,29 +78,174 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "status" -> status(sender);
             case "doctor" -> doctor(sender, label);
             case "button" -> button(sender, args);
-            case "points" -> points(sender);
+            case "points" -> points(sender, args);
             default -> usage(sender, label);
         }
         return true;
     }
 
-    /** {@code /fmwar points} —— 打印附魔战争积分榜。 */
-    private void points(CommandSender sender) {
+    /**
+     * {@code /fmwar points} —— 积分榜的查看与管理。
+     *
+     * <pre>
+     * /fmwar points                     第 1 页
+     * /fmwar points list &lt;页码&gt;         翻页（每页最多 10 条）
+     * /fmwar points set &lt;玩家&gt; &lt;分值&gt;   设为指定分值
+     * /fmwar points add &lt;玩家&gt; &lt;增量&gt;   加减分（增量可为负）
+     * /fmwar points remove &lt;玩家&gt;       删除记录
+     * /fmwar points reset               清空全部
+     * </pre>
+     */
+    private void points(CommandSender sender, String[] args) {
+        String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
+        switch (action) {
+            case "list", "page" -> pointsList(sender, args.length >= 3 ? args[2] : "1");
+            case "set" -> pointsSet(sender, args);
+            case "add" -> pointsAdd(sender, args);
+            case "remove", "delete", "del" -> pointsRemove(sender, args);
+            case "reset", "clear" -> pointsReset(sender);
+            default -> {
+                line(sender, "points-usage-title", Map.of());
+                for (String usage : new String[]{"list", "set", "add", "remove", "reset"}) {
+                    line(sender, "points-usage-" + usage, Map.of());
+                }
+            }
+        }
+    }
+
+    /** 每页最多显示的条目数。 */
+    private static final int POINTS_PAGE_SIZE = 10;
+
+    private void pointsList(CommandSender sender, String pageArg) {
         var ranking = points.ranking();
-        line(sender, "points-title", Map.of("count", Integer.toString(ranking.size())));
+        int totalPages = Math.max(1, (ranking.size() + POINTS_PAGE_SIZE - 1) / POINTS_PAGE_SIZE);
+        int page = parsePage(pageArg, totalPages);
+        line(sender, "points-list-title", Map.of(
+                "count", Integer.toString(ranking.size()),
+                "page", Integer.toString(page),
+                "pages", Integer.toString(totalPages)));
         if (ranking.isEmpty()) {
             line(sender, "points-empty", Map.of());
             return;
         }
-        int shown = 0;
-        for (var entry : ranking) {
-            if (++shown > 10) {
-                break;
-            }
+        int from = (page - 1) * POINTS_PAGE_SIZE;
+        int to = Math.min(ranking.size(), from + POINTS_PAGE_SIZE);
+        for (int index = from; index < to; index++) {
+            var entry = ranking.get(index);
             line(sender, "points-line", Map.of(
-                    "rank", Integer.toString(shown),
+                    "rank", Integer.toString(index + 1),
                     "player", entry.name(),
                     "points", Integer.toString(entry.points())));
+        }
+        if (totalPages > 1) {
+            line(sender, "points-page-hint", Map.of(
+                    "page", Integer.toString(page),
+                    "pages", Integer.toString(totalPages),
+                    "next", Integer.toString(page >= totalPages ? 1 : page + 1)));
+        }
+    }
+
+    private void pointsSet(CommandSender sender, String[] args) {
+        UUID target = resolveTarget(sender, args, 2);
+        if (target == null) {
+            return;
+        }
+        Integer value = parseInt(args.length >= 4 ? args[3] : null);
+        if (value == null) {
+            line(sender, "points-usage-set", Map.of());
+            return;
+        }
+        points.setPoints(target, value);
+        points.save();
+        line(sender, "points-updated", Map.of(
+                "player", displayName(target), "points", Integer.toString(Math.max(0, value))));
+        if (sender instanceof Player player) {
+            engine.refreshPointsBoard(player, 1);
+        }
+    }
+
+    private void pointsAdd(CommandSender sender, String[] args) {
+        UUID target = resolveTarget(sender, args, 2);
+        if (target == null) {
+            return;
+        }
+        Integer delta = parseInt(args.length >= 4 ? args[3] : null);
+        if (delta == null) {
+            line(sender, "points-usage-add", Map.of());
+            return;
+        }
+        int updated = points.adjustPoints(target, delta);
+        points.save();
+        line(sender, "points-updated", Map.of(
+                "player", displayName(target), "points", Integer.toString(updated)));
+    }
+
+    private void pointsRemove(CommandSender sender, String[] args) {
+        UUID target = resolveTarget(sender, args, 2);
+        if (target == null) {
+            return;
+        }
+        boolean removed = points.remove(target);
+        points.save();
+        line(sender, removed ? "points-removed" : "points-not-found",
+                Map.of("player", displayName(target)));
+    }
+
+    private void pointsReset(CommandSender sender) {
+        int cleared = points.clearAll();
+        points.save();
+        line(sender, "points-reset", Map.of("count", Integer.toString(cleared)));
+    }
+
+    /** 解析目标玩家：先按在线玩家名，再按已记录的玩家名。 */
+    private UUID resolveTarget(CommandSender sender, String[] args, int nameIndex) {
+        if (args.length <= nameIndex) {
+            line(sender, "points-need-player", Map.of());
+            return null;
+        }
+        String name = args[nameIndex];
+        org.bukkit.entity.Player online = Bukkit.getPlayerExact(name);
+        if (online != null) {
+            points.remember(online.getUniqueId(), online.getName());
+            return online.getUniqueId();
+        }
+        UUID known = points.findByName(name);
+        if (known != null) {
+            return known;
+        }
+        line(sender, "points-unknown-player", Map.of("player", name));
+        return null;
+    }
+
+    /** 展示用的玩家名：优先记录名，其次在线名，最后截断的 UUID。 */
+    private String displayName(UUID uuid) {
+        String stored = points.nameOf(uuid);
+        if (stored != null) {
+            return stored;
+        }
+        org.bukkit.entity.Player online = Bukkit.getPlayer(uuid);
+        if (online != null) {
+            return online.getName();
+        }
+        return uuid.toString().substring(0, 8);
+    }
+
+    private int parsePage(String text, int totalPages) {
+        Integer value = parseInt(text);
+        if (value == null || value < 1) {
+            return 1;
+        }
+        return Math.min(value, totalPages);
+    }
+
+    private Integer parseInt(String text) {
+        if (text == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException exception) {
+            return null;
         }
     }
 

@@ -130,6 +130,11 @@ public final class GameEngine {
     /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
     private boolean ended;
 
+    /** 最近一次分散的结果摘要，写进开局日志（便于确认落点而不是“又传到场地传送点”）。 */
+    private String lastDisperseReport = "未执行";
+    /** 当前查看的积分榜页码（1 起算）。 */
+    private int pointsPage = 1;
+
     private BukkitTask tickTask;
 
     public GameEngine(FMWar plugin, ConfigService config, AlertService alerts,
@@ -142,6 +147,17 @@ public final class GameEngine {
         this.scoreboard = scoreboard;
         this.shops = shops;
         this.points = points;
+    }
+
+    /** 供指令改完积分后立刻刷新积分榜。 */
+    public void refreshPointsBoard(Player viewer, int page) {
+        pointsPage = Math.max(1, page);
+        scoreboard.updatePoints(config.settings(), points.ranking(), pointsPage);
+    }
+
+    /** 当前查看的积分榜页码。 */
+    public int pointsPage() {
+        return pointsPage;
     }
 
     /** 供伤害监听上报“谁打了谁”，死亡时据此记击杀分。 */
@@ -272,7 +288,16 @@ public final class GameEngine {
             return;
         }
         if (timer != null) {
-            long remaining = TimeUtil.ceilSeconds(timer.remainingTicks(now));
+            long remainingTicks = timer.remainingTicks(now);
+            long remaining = TimeUtil.ceilSeconds(remainingTicks);
+            // 常驻显示：用 BossBar 而不是动作栏——动作栏只在玩家点按钮时才闪一下，
+            // 而这里要求“在队伍里能常驻显示”
+            // 需求：倒计时期间要常驻显示，同时保留动作栏文案
+            String text = alerts.render("prepare-countdown-bar", Map.of("seconds", Long.toString(remaining)));
+            double progress = timer.durationTicks() <= 0
+                    ? 0.0
+                    : Math.max(0.0, Math.min(1.0, remainingTicks / (double) timer.durationTicks()));
+            scoreboard.showCountdown(text, progress);
             if (remaining != lastCountdownSecond) {
                 lastCountdownSecond = remaining;
                 for (UUID uuid : queue) {
@@ -304,13 +329,13 @@ public final class GameEngine {
         // 否则同一 tick 会把名单遍历三遍
         int alive = aliveCount();
 
-        // 1) 记分板：剩余时间（默认直接写秒数）+ 存活人数
+        // 1) 记分板：剩余时间与存活人数都写在“记分值”上（条目名是标签）
         if (settings.scoreboard().enabled()) {
-            scoreboard.update(settings, TimeUtil.display(remainingTicks, settings.scoreboard().timeSeconds()),
-                    Integer.toString(alive));
+            long seconds = Math.max(0L, remainingTicks) / 20L;
+            scoreboard.update(settings, (int) seconds, alive);
             // 积分榜：每秒刷新一次即可，不必每 tick 重建条目
             if (elapsedTicks % 20L == 0L) {
-                scoreboard.updatePoints(settings, points.ranking());
+                scoreboard.updatePoints(settings, points.ranking(), pointsPage);
             }
         }
 
@@ -602,6 +627,7 @@ public final class GameEngine {
 
     private void beginGame() {
         Settings settings = config.settings();
+        scoreboard.hideCountdown();
         phase = GamePhase.RUNNING;
         timer = new Timer(GamePhase.RUNNING, Bukkit.getCurrentTick(), settings.timing().gameDurationSeconds() * 20L);
         members.clear();
@@ -633,6 +659,9 @@ public final class GameEngine {
             return;
         }
 
+        // 先广播“游戏开始”再做传送与发放：这样玩家一定能看到开局提示，
+        // 即使后续某一步（分散/放箱/生成商店）出错也不会静默
+        alerts.broadcast("game-start", Map.of());
         disperse(participants);
         for (Player player : participants) {
             applyStartState(player);
@@ -644,7 +673,8 @@ public final class GameEngine {
                 plugin.getLogger().info("已生成 " + spawned + " 个附魔战争商店 NPC");
             }
         }
-        alerts.broadcast("game-start", Map.of());
+        plugin.getLogger().info("对局开始：参战 " + participants.size() + " 人，"
+                + "分散落点 " + lastDisperseReport);
     }
 
     /**
@@ -730,6 +760,8 @@ public final class GameEngine {
         Settings.Disperse disperse = settings.disperse();
         Region arena = settings.optionalRegion("arena");
         if (!disperse.enabled() || world == null) {
+            lastDisperseReport = "已禁用或世界未加载，全部使用场地传送点";
+            plugin.getLogger().warning("分散未执行（" + lastDisperseReport + "）");
             for (Player player : participants) {
                 teleport(player, settings.location("arena-spawn"));
             }
@@ -739,6 +771,7 @@ public final class GameEngine {
         // 此时 SafeLocation 会自行从世界最高点向下找，行为与之前一致
         double referenceY = disperse.centerY();
         List<Location> taken = new ArrayList<>();
+        int fallback = 0;
         for (int index = 0; index < participants.size(); index++) {
             final Player player = participants.get(index);
             final int slot = index;
@@ -751,6 +784,7 @@ public final class GameEngine {
                 continue;
             }
             // 找不到合格点：异步加载该区块后再试一次，仍失败则退回场地传送点
+            fallback++;
             int chunkX = (int) Math.floor(disperse.centerX()) >> 4;
             int chunkZ = (int) Math.floor(disperse.centerZ()) >> 4;
             world.getChunkAtAsync(chunkX, chunkZ).thenAccept(chunk -> Bukkit.getScheduler().runTask(plugin, () -> {
@@ -761,11 +795,18 @@ public final class GameEngine {
                     taken.add(retry);
                     teleport(player, retry);
                 } else {
-                    plugin.getLogger().warning("玩家 " + player.getName() + " 未能找到分散落点（槽位 " + slot + "），已退回场地传送点");
+                    plugin.getLogger().warning("玩家 " + player.getName() + " 未能找到分散落点（槽位 " + slot
+                            + "），已退回场地传送点。请检查 regions.arena 是否覆盖分散范围、"
+                            + "以及该范围内是否有可站立地面");
                     teleport(player, settings.location("arena-spawn"));
                 }
             }));
         }
+        lastDisperseReport = taken.size() + "/" + participants.size() + " 人成功分散"
+                + "（中心 " + (long) disperse.centerX() + "," + (long) disperse.centerZ()
+                + " 正方形半边长 " + (long) disperse.radius()
+                + "，最小间距 " + (long) disperse.minSpacing()
+                + (fallback > 0 ? "，" + fallback + " 人走异步重试" : "") + "）";
     }
 
     private void teleportToDuel() {
@@ -794,12 +835,21 @@ public final class GameEngine {
     // 奖励箱
     // ------------------------------------------------------------------
 
+    /**
+     * 在配置坐标生成奖励箱，每个箱子随机取一行内容放进去。
+     *
+     * <p>带完整诊断日志：箱子是否放上、用了哪一行、解析出几件物品、失败在哪一步，
+     * 都写进控制台。此前“箱子是空的”这类问题只能靠猜，这行日志能直接定位。</p>
+     */
     private void spawnChests() {
         Settings.Loot loot = config.settings().loot();
         if (loot.lootGroups().isEmpty()) {
+            plugin.getLogger().warning("奖励箱内容行为空（chests.loot-groups），不会生成任何奖励箱");
             return;
         }
         ThreadLocalRandom random = ThreadLocalRandom.current();
+        int placed = 0;
+        int totalItems = 0;
         for (Position position : loot.chestLocations()) {
             Location location = position.toLocation();
             if (location == null || location.getWorld() == null) {
@@ -816,17 +866,28 @@ public final class GameEngine {
             if (block.getType() != Material.CHEST) {
                 block.setType(Material.CHEST, false);
             }
-            if (block.getState() instanceof Chest chest) {
-                // 每个箱子独立随机取一行，且只放这一行的物品
-                List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
-                List<ItemStack> items = plugin.lootParser().parseGroup(group);
-                for (int slot = 0; slot < items.size() && slot < chest.getInventory().getSize(); slot++) {
-                    chest.getInventory().setItem(slot, items.get(slot));
-                }
-                chest.update(true, false);
-                chests.add(block.getLocation());
+            // 用 getState() 拿到真实的方块实体；置物后 update(true, true) 同时刷新方块数据与方块实体
+            if (!(block.getState() instanceof Chest chest)) {
+                plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
+                        + " 无法取得箱子方块实体，已跳过");
+                continue;
             }
+            List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
+            List<ItemStack> items = plugin.lootParser().parseGroup(group);
+            if (items.isEmpty()) {
+                plugin.getLogger().warning("奖励箱内容行解析后为空，该箱未放入任何物品：" + group
+                        + " —— 多半是附魔键在本服未注册，可用 /fmwar doctor 查看");
+            }
+            for (int slot = 0; slot < items.size() && slot < chest.getInventory().getSize(); slot++) {
+                chest.getInventory().setItem(slot, items.get(slot));
+            }
+            chest.update(true, true);
+            chests.add(block.getLocation());
+            placed++;
+            totalItems += items.size();
         }
+        plugin.getLogger().info("奖励箱：已生成 " + placed + "/" + loot.chestLocations().size()
+                + " 个，共放入 " + totalItems + " 件物品");
     }
 
     private void clearChests() {
