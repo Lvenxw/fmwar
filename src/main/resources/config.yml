@@ -109,6 +109,8 @@ disperse:
 duel:
   center: [-1311, -1740, 0]
   radius: 40
+  # 决斗圈落点之间的最小间距（格）。设为 0 表示不限制。
+  min-spacing: 5
   max-attempts: 300
 
 # ===========================================================================
@@ -119,8 +121,9 @@ start:
   clear-inventory: true
   clear-effects: true
   # 离场/死亡后是否把入场时备份的背包还给玩家。
-  # 默认 true：入场前的物品属于玩家，不带出场地指的是**游戏内获得的**物品。
-  # 还原后再执行一次清空，保证场地内拿到的附魔装备不会跟着出去。
+  # 默认 true：入场前的物品属于玩家；还原动作会整体覆盖背包，因此**本局在场地内获得的**
+  # 物品（奖励箱装备、绿宝石、钓竿）不会跟着带出去。设为 false 则连入场前的物品也一并丢弃，
+  # 适用于服上另有背包备份机制的情况。
   restore-on-leave: true
   # 是否在提示接收范围内一并禁止潜行。
   # 默认 false：需求里的“坐下/躺下/趴下”由坐姿插件提供，原版只有潜行可拦，容易误伤。
@@ -175,7 +178,7 @@ chests:
     - - 'SPEAR:faith=1,lunge=5'
     - - 'CROSSBOW:fusion_strike=1'
     - - 'BOW:eternal=1'
-      - 'TIPPED_ARROW:instant_damage=1'
+      - 'TIPPED_ARROW:potion=instant_damage;amplifier=1'
     - - 'NETHERITE_HELMET:evil_frenzy=1'
       - 'FISHING_ROD:magnetic_link=1,beach_boy=2'
     - - 'NETHERITE_CHESTPLATE:fortitude=1'
@@ -222,6 +225,7 @@ messages:
   spectator-unavailable: '{prefix}&c当前没有进行中的对局，无法观战'
   spectator-only-in-game: '{prefix}&c你正在游戏中，无法观战'
   spectator-enter: '{prefix}&7你已进入观战模式'
+  arena-forbidden: '{prefix}&c对局进行中，无关玩家不能进入场地'
   action-blocked: '{prefix}&c该动作在游戏场地范围内不允许'
   spectator-arena-exit: '{prefix}&7你已离开场地范围'
   player-arena-exit: '{prefix}&c{player} &7离开了游戏'
@@ -233,4 +237,3 @@ messages:
   reload-ok: '{prefix}&a配置已重新加载'
   reload-failed: '{prefix}&c配置加载失败，请查看控制台日志'
   no-permission: '{prefix}&c你没有权限执行该操作'
-  chest-not-found: '{prefix}&7商店 &f{shop} &7未定义，请先在服务器上配置'

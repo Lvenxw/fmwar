@@ -72,11 +72,16 @@ public final class ConfigManager {
 
         Settings parsed = parse(yaml);
         Spec.Validation checked = validate(parsed);
+        if (!checked.ok()) {
+            // 校验不通过时保留上一份可用配置：reload 写坏了 YAML 不应该让进行中的对局
+            // 立刻切到半残配置（例如区域被占位成 0,0,0）
+            plugin.getLogger().warning("配置存在问题，已保留上一份可用配置：" + checked.describe());
+            this.validation = checked;
+            return false;
+        }
         this.settings = parsed;
         this.validation = checked;
-        if (!checked.ok()) {
-            plugin.getLogger().warning("配置存在问题：" + checked.describe());
-        }
+        plugin.getLogger().info("配置加载完成");
         return true;
     }
     // ------------------------------------------------------------------
@@ -114,6 +119,7 @@ public final class ConfigManager {
         Settings.Duel duel = new Settings.Duel(
                 duelCenter[0], duelCenter[2],
                 yaml.getDouble("duel.radius", 40.0),
+                yaml.getDouble("duel.min-spacing", 5.0),
                 (int) yaml.getLong("duel.max-attempts", 300));
 
         Settings.Start start = new Settings.Start(

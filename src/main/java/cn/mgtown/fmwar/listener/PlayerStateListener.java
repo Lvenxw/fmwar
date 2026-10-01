@@ -8,6 +8,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 
 /**
  * 玩家生命周期入口：上线、掉线、死亡。
@@ -36,15 +37,29 @@ public final class PlayerStateListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDeath(PlayerDeathEvent event) {
         Player player = event.getEntity();
-        if (!engine.isRunning() || !engine.isMember(player.getUniqueId())) {
+        if (!engine.isActive() || !engine.isMember(player.getUniqueId())) {
             return;
         }
         // 需求：死亡玩家的背包要被清空。原版死亡会先把物品掉在场地里，
-        // 这里取消掉落，改为把“本该掉落的物品”放到大厅，避免场地内留下物品堆。
-        java.util.List<org.bukkit.inventory.ItemStack> drops = java.util.List.copyOf(event.getDrops());
+        // 物品本身不再落地（避免与“游戏内物品不能带出游戏场地”冲突），
+        // 只有“入场前备份的背包”会在离场时还给玩家。
         event.getDrops().clear();
         event.setDroppedExp(0);
-        engine.eliminate(player, "death", true);
-        engine.dropAtHall(drops);
+        engine.eliminate(player, "death", true, true);
+    }
+
+    /** 死亡重生点设为大厅，避免主动重生后落在服务器默认出生点。 */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onRespawn(PlayerRespawnEvent event) {
+        if (!engine.isActive()) {
+            return;
+        }
+        if (engine.isMember(event.getPlayer().getUniqueId())) {
+            return;
+        }
+        org.bukkit.Location hall = engine.hallLocation();
+        if (hall != null) {
+            event.setRespawnLocation(hall);
+        }
     }
 }

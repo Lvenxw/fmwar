@@ -86,7 +86,7 @@ public record Settings(
                            double minSpacing, int maxAttempts) {
     }
 
-    public record Duel(double centerX, double centerZ, double radius, int maxAttempts) {
+    public record Duel(double centerX, double centerZ, double radius, double minSpacing, int maxAttempts) {
     }
 
     public record Start(boolean clearInventory,

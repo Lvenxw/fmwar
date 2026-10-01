@@ -14,7 +14,6 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
-import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
@@ -81,12 +80,17 @@ public final class GameEngine {
     private long lastCountdownSecond = -1L;
     /** 上次扣血的秒数。 */
     private long lastOvertimeSecond = -1L;
-    /** 上次发放绿宝石的秒数。 */
-    private long lastEmeraldSecond = -1L;
+    /** 上次发放绿宝石时的对局已进行秒数。 */
+    private long lastEmeraldSecond = 0L;
+    /** 上一 tick 的剩余时间，用于卡顿时的决斗圈传送闸门。 */
+    private long lastRemainingTicks = Long.MAX_VALUE;
     /** 是否已经执行过决斗圈传送。 */
     private boolean duelTeleported;
     /** 本局生成的奖励箱方块坐标（结束时清理）。 */
     private final List<Location> chests = new ArrayList<>();
+
+    /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
+    private boolean ended;
 
     private BukkitTask tickTask;
 
@@ -131,12 +135,17 @@ public final class GameEngine {
         }
     }
 
+    /**
+     * 解析游戏世界。
+     *
+     * <p>刻意**不**回退到 `getWorlds().get(0)`：需求里的所有坐标都绑定在 game 世界，
+     * 静默回退会让奖励箱与分散传送落到错误的世界，比直接报错更难排查。</p>
+     */
     private World resolveWorld() {
         String name = config.settings().world();
         World resolved = Bukkit.getWorld(name);
-        if (resolved == null && !Bukkit.getWorlds().isEmpty()) {
-            resolved = Bukkit.getWorlds().get(0);
-            plugin.getLogger().warning("world 配置为 " + name + " 但该世界未加载，已退回 " + resolved.getName());
+        if (resolved == null) {
+            plugin.getLogger().severe("配置世界 " + name + " 未加载：请修正 config.yml 的 world / regions.*.world 后 /fmwar reload");
         }
         return resolved;
     }
@@ -149,10 +158,11 @@ public final class GameEngine {
         long now = Bukkit.getCurrentTick();
         switch (phase) {
             case IDLE -> {
-                // 空闲阶段只需保证准备进度归零
+                // 空闲阶段：准备进度归零，并保证“离开准备房间即退出队列”始终生效
                 if (prepareClicks != 0) {
                     prepareClicks = 0;
                 }
+                syncPrepRoster();
             }
             case PREPARING -> tickPreparing(now);
             case RUNNING -> tickRunning(now);
@@ -187,7 +197,6 @@ public final class GameEngine {
         }
         long remainingTicks = timer.remainingTicks(now);
         long elapsedTicks = timer.elapsedTicks(now);
-        long durationSeconds = timer.durationTicks() / 20L;
         Settings settings = config.settings();
 
         // 0) 场地范围判定（离场/观战离场）
@@ -199,30 +208,36 @@ public final class GameEngine {
         }
 
         // 2) 剩 N 秒时把场内玩家集中到决斗圈
-        if (!duelTeleported && remainingTicks <= settings.timing().duelTeleportAtSeconds() * 20L) {
+        //    用“上一 tick 的剩余时间”做闸门：服务器卡顿导致一次跳过多个 tick 时，
+        //    只要跨过阈值就触发，但不会因为载入旧存档（剩余时间本来就很小）而立刻传送
+        long duelThresholdTicks = settings.timing().duelTeleportAtSeconds() * 20L;
+        boolean crossedThreshold = lastRemainingTicks > duelThresholdTicks && remainingTicks <= duelThresholdTicks;
+        boolean alreadyBelow = remainingTicks > 0 && remainingTicks <= duelThresholdTicks && lastRemainingTicks == Long.MAX_VALUE;
+        if (!duelTeleported && (crossedThreshold || alreadyBelow)) {
             duelTeleported = true;
             teleportToDuel();
         }
+        lastRemainingTicks = remainingTicks;
 
-        // 3) 每 interval 秒发一颗绿宝石
-        long elapsedSeconds = TimeUtil.ceilSeconds(elapsedTicks);
+        // 3) 每 interval 秒发一颗绿宝石（用“距上次发放已经过多少秒”判定，丢 tick 也不会漏发）
+        long elapsedSeconds = elapsedTicks / 20L;
         long interval = Math.max(1L, settings.timing().emeraldIntervalSeconds());
-        if (elapsedSeconds > 0 && elapsedSeconds % interval == 0 && elapsedSeconds != lastEmeraldSecond) {
+        if (elapsedSeconds >= lastEmeraldSecond + interval) {
             lastEmeraldSecond = elapsedSeconds;
             giveEmeralds();
         }
 
         // 4) 倒计时归零：每秒扣血
         if (remainingTicks <= 0) {
-            long overtime = TimeUtil.ceilSeconds(-remainingTicks);
+            long overtime = (-remainingTicks) / 20L;
             if (overtime > lastOvertimeSecond) {
                 lastOvertimeSecond = overtime;
                 applyOvertimeDamage();
             }
         }
 
-        // 5) 周期性复核：对局中存活人数跌破两人时放弃本局（正常情况下 checkVictory 会先结束对局）
-        if (durationSeconds > 0 && elapsedTicks % 80L == 0L && aliveCount() < 2) {
+        // 5) 周期性复核：存活人数跌破两人时放弃本局（正常情况下 checkVictory 会先结束对局）
+        if (elapsedTicks % 80L == 0L && aliveCount() < 2) {
             endGame();
         }
     }
@@ -237,36 +252,60 @@ public final class GameEngine {
     // 准备房间
     // ------------------------------------------------------------------
 
-    /** 准备房间内玩家集合有变化时重置准备进度（需求：期间有玩家进入则重置）。 */
+    /**
+     * 同步准备房间名单，并处理“离开准备房间即退出队列”（需求 39）。
+     *
+     * <p>这段逻辑每 tick 都跑（含 IDLE 阶段），因此队列成员集合始终等于
+     * “已入队且仍在准备房间内”的玩家，准备倒计时的人数判定也用它，而不是队列总数。</p>
+     */
     private void syncPrepRoster() {
         Set<UUID> current = playersInRegion(config.settings().region("prep-room"));
-        if (!current.equals(prepRoster)) {
-            prepRoster = current;
-            if (timer != null) {
-                // 倒计时期间人数变化：人数不足则退回准备阶段并提示
-                if (queue.size() < 2) {
-                    timer = null;
-                    prepareClicks = 0;
-                    lastCountdownSecond = -1L;
-                    alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
-                }
-            } else if (prepareClicks > 0) {
-                prepareClicks = 0;
-                alerts.broadcastTo(onlinePlayers(prepRoster), "prepare-reset", Map.of());
+        if (current.equals(prepRoster)) {
+            return;
+        }
+        prepRoster = current;
+
+        // 已入队但已不在准备房间内的玩家：退出队列
+        for (UUID uuid : new ArrayList<>(queue)) {
+            if (current.contains(uuid)) {
+                continue;
+            }
+            Player player = Bukkit.getPlayer(uuid);
+            queue.remove(uuid);
+            if (player != null) {
+                alerts.sendTo(player, "queue-left-self", Map.of());
+                alerts.broadcast("queue-leave", Map.of("player", player.getName()));
             }
         }
+
+        if (timer != null) {
+            // 倒计时期间准备房间内人数不足两人：退回准备阶段并提示
+            if (queuedInRoom() < 2) {
+                timer = null;
+                prepareClicks = 0;
+                lastCountdownSecond = -1L;
+                alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
+            }
+        } else if (prepareClicks > 0) {
+            prepareClicks = 0;
+            alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
+        }
+    }
+
+    /** 准备房间内**已入队**的玩家数量（需求里的“准备房间范围满足至少两名玩家”）。 */
+    private int queuedInRoom() {
+        int count = 0;
+        for (UUID uuid : playersInRegion(config.settings().region("prep-room"))) {
+            if (queue.contains(uuid)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /** 队列是否够人（准备房间内至少两名已入队玩家）。 */
     public boolean canStart() {
-        Set<UUID> inRoom = playersInRegion(config.settings().region("prep-room"));
-        int queued = 0;
-        for (UUID uuid : inRoom) {
-            if (queue.contains(uuid)) {
-                queued++;
-            }
-        }
-        return queued >= 2;
+        return queuedInRoom() >= 2;
     }
 
     /** 右键准备按钮。 */
@@ -303,13 +342,24 @@ public final class GameEngine {
     // 队列
     // ------------------------------------------------------------------
 
+    /** 对局是否已经开打（含正在结算的那一 tick）。 */
     public boolean isRunning() {
         return phase == GamePhase.RUNNING || phase == GamePhase.ENDING;
     }
 
+    /** 当前是否处于“已经开始、尚未结算完成”的活跃对局（防止对局外玩家被淘汰逻辑带走）。 */
+    public boolean isActive() {
+        return phase == GamePhase.RUNNING;
+    }
+
+    /** 是否正在收尾结算（此时不应再放人进场）。 */
+    public boolean isSettling() {
+        return phase == GamePhase.ENDING;
+    }
+
     public boolean tryJoinQueue(Player player) {
         if (phase != GamePhase.IDLE) {
-            // 对局中与准备倒计时中都不再接收新玩家
+            // 对局中、结算中与准备倒计时中都不再接收新玩家
             alerts.sendTo(player, "game-already-running", Map.of());
             return false;
         }
@@ -323,8 +373,10 @@ public final class GameEngine {
         return true;
     }
 
+    /** 主动退出队列（准备房间外移动等路径使用）。 */
     public void quitQueue(Player player) {
         if (queue.remove(player.getUniqueId())) {
+            alerts.sendTo(player, "queue-left-self", Map.of());
             alerts.broadcast("queue-leave", Map.of("player", player.getName()));
         }
     }
@@ -386,8 +438,10 @@ public final class GameEngine {
         timer = new Timer(GamePhase.RUNNING, Bukkit.getCurrentTick(), settings.timing().gameDurationSeconds() * 20L);
         members.clear();
         duelTeleported = false;
+        ended = false;
         lastOvertimeSecond = -1L;
-        lastEmeraldSecond = -1L;
+        lastEmeraldSecond = 0L;
+        lastRemainingTicks = Long.MAX_VALUE;
         lastCountdownSecond = -1L;
         prepareClicks = 0;
 
@@ -406,8 +460,8 @@ public final class GameEngine {
 
         if (participants.isEmpty()) {
             alerts.broadcast("game-over", Map.of());
-            phase = GamePhase.ENDING;
-            timer = new Timer(GamePhase.ENDING, Bukkit.getCurrentTick(), 1L);
+            ended = true;
+            endGame();
             return;
         }
 
@@ -536,7 +590,7 @@ public final class GameEngine {
         List<Location> taken = new ArrayList<>();
         for (Player player : onlineMembers()) {
             Location sample = SafeLocation.sample(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), 0.0, duel.maxAttempts(), taken);
+                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken);
             if (sample == null) {
                 teleport(player, settings.location("arena-spawn"));
                 continue;
@@ -564,7 +618,15 @@ public final class GameEngine {
                 continue;
             }
             Block block = location.getBlock();
-            block.setType(Material.CHEST, false);
+            // 只覆盖空气或可替换方块：避免把别人放的建筑直接抹掉，同时保留已有的箱子（只填内容）
+            if (block.getType() != Material.CHEST && !block.isReplaceable()) {
+                plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
+                        + " 被 " + block.getType() + " 占用且不可替换，已跳过");
+                continue;
+            }
+            if (block.getType() != Material.CHEST) {
+                block.setType(Material.CHEST, false);
+            }
             if (block.getState() instanceof Chest chest) {
                 // 每个箱子独立随机取一行，且只放这一行的物品
                 List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
@@ -615,13 +677,17 @@ public final class GameEngine {
     // 离场、掉线与死亡
     // ------------------------------------------------------------------
 
-    /** 每 tick 检查离场：游戏内玩家离开场地按“离开游戏”处理，观战玩家离开则送回大厅。 */
+    /**
+     * 每 tick 检查场地进出：参战者离开→淘汰，观战者离开→送回大厅，
+     * 与本局无关的玩家进入→送回大厅（否则可以进来开箱子、干扰对局）。
+     */
     private void checkArenaPresence() {
         if (phase != GamePhase.RUNNING) {
             return;
         }
         Region arena = config.settings().region("arena");
-        for (UUID uuid : new ArrayList<>(members)) {            Player player = Bukkit.getPlayer(uuid);
+        for (UUID uuid : new ArrayList<>(members)) {
+            Player player = Bukkit.getPlayer(uuid);
             if (player == null) {
                 continue;
             }
@@ -634,10 +700,29 @@ public final class GameEngine {
                 exitSpectator(player);
             }
         }
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            UUID uuid = player.getUniqueId();
+            if (members.contains(uuid) || teams.inSpectatorTeam(uuid)) {
+                continue;
+            }
+            if (arena.contains(player.getLocation())) {
+                teleport(player, config.settings().location("hall-spawn"));
+                alerts.sendTo(player, "arena-forbidden", Map.of());
+            }
+        }
     }
 
     /** 淘汰一名游戏内玩家：清背包、清效果、移出队伍、送回大厅并广播。 */
     public void eliminate(Player player, String messageKey, boolean broadcast) {
+        eliminate(player, messageKey, broadcast, false);
+    }
+
+    /**
+     * 淘汰一名游戏内玩家：清背包、清效果、移出队伍、送回大厅并广播。
+     *
+     * @param respawn 是否需要在下一 tick 主动把玩家从死亡界面拉回来（只有死亡路径需要）
+     */
+    public void eliminate(Player player, String messageKey, boolean broadcast, boolean respawn) {
         UUID uuid = player.getUniqueId();
         if (!members.remove(uuid)) {
             return;
@@ -645,8 +730,11 @@ public final class GameEngine {
         clearPlayerState(player);
         teams.leaveAll(uuid);
         scoreboard.detach(player);
-        scheduleRespawn(player);
-        teleport(player, config.settings().location("hall-spawn"));
+        // 传送豁免：淘汰后的传送可能落到领地内，必须保证成功
+        teleport(player, config.settings().locationOrNull("hall-spawn"), true);
+        if (respawn) {
+            scheduleRespawn(player);
+        }
         if (messageKey != null && !messageKey.isEmpty()) {
             if (broadcast) {
                 alerts.broadcast(messageKey, Map.of("player", player.getName()));
@@ -654,15 +742,18 @@ public final class GameEngine {
                 alerts.sendTo(player, messageKey, Map.of("player", player.getName()));
             }
         }
-        checkVictory();
+        if (!ended) {
+            checkVictory();
+        }
     }
 
     /**
-     * 死亡淘汰后把玩家从死亡界面拉回来。
+     * 死亡淘汰后把玩家从死亡界面拉回来，并确保落点是大厅。
      *
-     * <p>需求要求死亡玩家“传送至大厅传送点”，但玩家死亡时会停留在重生界面，
-     * 直接 teleport 会让其在点击重生后被拉回死亡点。这里延后 1 tick 主动重生，
-     * 且只在玩家确实处于死亡状态时才调用，避免对存活玩家误触发重生。</p>
+     * <p>只在死亡路径调用（{@code respawn=true}）。离场/掉线等路径没有死亡界面，
+     * 若也调用 respawn 会被服务器重生点覆盖掉刚刚的大厅传送。
+     * 主动重生会触发 {@link org.bukkit.event.player.PlayerRespawnEvent}，
+     * 由 {@code PlayerStateListener} 把重生点设成大厅。</p>
      */
     private void scheduleRespawn(Player player) {
         Bukkit.getScheduler().runTask(plugin, () -> {
@@ -672,7 +763,7 @@ public final class GameEngine {
             if (player.isDead()) {
                 player.spigot().respawn();
             }
-            teleport(player, config.settings().location("hall-spawn"));
+            teleport(player, config.settings().locationOrNull("hall-spawn"), true);
         });
     }
 
@@ -708,32 +799,6 @@ public final class GameEngine {
         }
     }
 
-    /** 把死亡时本该掉落的物品放到大厅（需求：死亡玩家的背包被清空，物品不能留在场地里）。 */
-    public void dropAtHall(List<ItemStack> drops) {
-        if (drops == null || drops.isEmpty()) {
-            return;
-        }
-        Position hall = config.settings().locationOrNull("hall-spawn");
-        if (hall == null) {
-            return;
-        }
-        Location location = hall.toLocation();
-        if (location == null) {
-            return;
-        }
-        World target = location.getWorld();
-        if (target == null) {
-            return;
-        }
-        for (ItemStack stack : drops) {
-            if (stack == null || stack.getType().isAir()) {
-                continue;
-            }
-            Item item = target.dropItem(location, stack);
-            item.setPickupDelay(20);
-        }
-    }
-
     /** 观战玩家离场：回大厅 + 生存模式 + 移出队伍。 */
     public void exitSpectator(Player player) {
         teams.leaveAll(player.getUniqueId());
@@ -745,7 +810,8 @@ public final class GameEngine {
 
     /** 右键观战按钮。 */
     public boolean trySpectate(Player player) {
-        if (!isRunning()) {
+        if (!isActive()) {
+            // 结算中的那一 tick 也不放人进场，否则刚进来就会被清场
             alerts.sendTo(player, "spectator-unavailable", Map.of());
             return false;
         }
@@ -761,23 +827,37 @@ public final class GameEngine {
         return true;
     }
 
-    /** 玩家掉线。 */
+    /**
+     * 玩家掉线。
+     *
+     * <p>需求 108：参战者掉线即视为离开游戏——当场清空背包与药水效果、移出队伍；
+     * 之后重新上线时因为已不在队伍里，会走“对局已结束/已离开”的分支被送回大厅，
+     * 而不会被误判成观战者。</p>
+     */
     public void onQuit(Player player) {
         UUID uuid = player.getUniqueId();
-        if (members.contains(uuid)) {
-            members.remove(uuid);
+        if (members.remove(uuid)) {
+            if (isActive()) {
+                clearPlayerState(player);
+            }
+            teams.leaveAll(uuid);
+            scoreboard.detach(player);
             alerts.broadcast("quit", Map.of("player", player.getName()));
             checkVictory();
         }
         queue.remove(uuid);
+        // 掉线者下一 tick 起不在准备房间内，主动从名单里摘掉，避免上线时被误传回大厅
+        Set<UUID> current = new HashSet<>(prepRoster);
+        current.remove(uuid);
+        prepRoster = current;
     }
 
     /** 玩家上线。 */
     public void onJoin(Player player) {
         UUID uuid = player.getUniqueId();
         if (phase == GamePhase.RUNNING) {
-            if (teams.inPlayerTeam(uuid)) {
-                // 对局中离线的参战者不再回到对局，按观战处理并送到场地观战点
+            if (members.contains(uuid)) {
+                // 名单里仍有此人（例如跨 tick 的边界情况）：按观战处理，不再回到对局
                 teams.joinSpectatorTeam(uuid);
                 player.setGameMode(GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
@@ -792,7 +872,7 @@ public final class GameEngine {
             }
         }
         if (teams.inSpectatorTeam(uuid) || teams.inPlayerTeam(uuid)) {
-            // 对局已结束：清干净并送回大厅
+            // 对局已结束或已离开：清干净并送回大厅
             teams.leaveAll(uuid);
             scoreboard.detach(player);
             player.setGameMode(GameMode.SURVIVAL);
@@ -844,20 +924,24 @@ public final class GameEngine {
 
     /** 只剩一名玩家则胜利；一名不剩则无人生还。挂起 1 tick，避开死亡结算中的中间态。 */
     private void checkVictory() {
-        if (phase != GamePhase.RUNNING) {
+        if (phase != GamePhase.RUNNING || ended) {
             return;
         }
         Bukkit.getScheduler().runTask(plugin, () -> {
-            if (phase != GamePhase.RUNNING) {
+            // ended 标志保证同一局只结算一次：否则“宣布胜利 → 淘汰胜利者”会再触发一次
+            // “无人生还”，同一局出现两条矛盾提示
+            if (phase != GamePhase.RUNNING || ended) {
                 return;
             }
             List<Player> alive = onlineMembers();
             if (alive.size() == 1) {
                 Player winner = alive.get(0);
+                ended = true;
                 alerts.broadcast("win", Map.of("player", winner.getName()));
                 eliminate(winner, null, false);
                 endGame();
             } else if (alive.isEmpty()) {
+                ended = true;
                 alerts.broadcast("no-survivor", Map.of());
                 endGame();
             }
@@ -895,6 +979,7 @@ public final class GameEngine {
             teleport(player, settings.location("hall-spawn"));
         }
         clearChests();
+        clearArenaEntities();
         shops.despawnAll();
         scoreboard.detachAll();
         members.clear();
@@ -902,6 +987,7 @@ public final class GameEngine {
         prepareClicks = 0;
         prepRoster = Set.of();
         timer = null;
+        ended = false;
         phase = GamePhase.IDLE;
         alerts.broadcast("game-over", Map.of());
     }
@@ -921,12 +1007,47 @@ public final class GameEngine {
             teleport(player, config.settings().location("hall-spawn"));
         }
         clearChests();
+        clearArenaEntities();
         shops.despawnAll();
         scoreboard.detachAll();
         members.clear();
         queue.clear();
+        prepareClicks = 0;
+        prepRoster = Set.of();
         timer = null;
+        ended = false;
         phase = GamePhase.IDLE;
+    }
+
+    /** 大厅传送点；未配置或世界未加载时返回 null。供重生点设置使用。 */
+    public Location hallLocation() {
+        Position hall = config.settings().locationOrNull("hall-spawn");
+        return hall == null ? null : hall.toLocation();
+    }
+
+    /**
+     * 清空场地范围内所有实体（不含玩家）。
+     *
+     * <p>需求 118：“清空游戏场地范围内所有实体（不包括玩家，此时玩家应全部离开场地范围）”。
+     * 只删自己放的奖励箱是不够的——掉落物、射出的箭、投掷物、载具都要一并清理。</p>
+     */
+    private void clearArenaEntities() {
+        Region arena = config.settings().optionalRegion("arena");
+        if (arena == null) {
+            return;
+        }
+        World target = arena.bukkitWorld();
+        if (target == null) {
+            return;
+        }
+        for (org.bukkit.entity.Entity entity : target.getEntities()) {
+            if (entity instanceof Player) {
+                continue;
+            }
+            if (arena.contains(entity.getLocation())) {
+                entity.remove();
+            }
+        }
     }
 
     /** 强制中止（/fmwar stop）。 */
@@ -944,22 +1065,39 @@ public final class GameEngine {
             plugin.getLogger().warning("传送目标未配置，玩家 " + player.getName() + " 未被传送");
             return;
         }
-        Location location = target.toLocation();
-        if (location == null) {
-            plugin.getLogger().warning("传送目标世界未加载: " + target.world());
+        teleport(player, target.toLocation());
+    }
+
+    /** 传送（带豁免开关）。 */
+    public void teleport(Player player, Position target, boolean bypass) {
+        if (target == null) {
+            plugin.getLogger().warning("传送目标未配置，玩家 " + player.getName() + " 未被传送");
             return;
         }
-        teleport(player, location);
+        teleport(player, target.toLocation(), bypass);
     }
 
     /** 传送并把 UUID 加入豁免集合，供 EntityTeleportEvent 放行。 */
     public void teleport(Player player, Location location) {
+        teleport(player, location, true);
+    }
+
+    /**
+     * 传送。
+     *
+     * @param bypass true 时把该玩家短暂加入传送豁免集合，使领地插件的传送限制不会打断本插件的传送
+     */
+    public void teleport(Player player, Location location, boolean bypass) {
         if (location == null) {
             return;
         }
-        teleportBypass.add(player.getUniqueId());
-        player.teleportAsync(location).whenComplete((result, error) ->
-                Bukkit.getScheduler().runTask(plugin, () -> teleportBypass.remove(player.getUniqueId())));
+        if (bypass) {
+            teleportBypass.add(player.getUniqueId());
+            player.teleportAsync(location).whenComplete((result, error) ->
+                    Bukkit.getScheduler().runTask(plugin, () -> teleportBypass.remove(player.getUniqueId())));
+        } else {
+            player.teleportAsync(location);
+        }
     }
 
     public boolean isBypassingTeleport(UUID uuid) {

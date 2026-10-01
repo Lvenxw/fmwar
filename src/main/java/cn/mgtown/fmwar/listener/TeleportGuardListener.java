@@ -41,15 +41,16 @@ public final class TeleportGuardListener implements Listener {
             return;
         }
         Location to = event.getTo();
+        Location from = event.getFrom();
         if (to == null) {
             return;
         }
         if (!insideProtectedRegions(to)) {
             return;
         }
-        // 已经在场内且在场地内部移动：不拦（避免打断观战/游戏内的正常位移检测）
-        Location from = event.getFrom();
-        if (from != null && insideArena(from) && insideArena(to)) {
+        // 已经位于受保护区域内的玩家在区域内/区域间移动：放行，
+        // 否则管理员与其它插件在大厅、准备房间内的正常传送（包括死亡重生）会被无谓取消
+        if (from != null && insideProtectedRegions(from)) {
             return;
         }
         event.setCancelled(true);
@@ -60,10 +61,6 @@ public final class TeleportGuardListener implements Listener {
                 || inside(location, "prep-room")
                 || inside(location, "hall")
                 || inside(location, "duel-1");
-    }
-
-    private boolean insideArena(Location location) {
-        return inside(location, "arena");
     }
 
     private boolean inside(Location location, String regionKey) {
