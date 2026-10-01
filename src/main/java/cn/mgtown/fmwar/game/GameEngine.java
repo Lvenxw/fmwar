@@ -100,12 +100,18 @@ public final class GameEngine {
     /** 刚被淘汰的玩家 → 豁免截止 tick：避免其被“无关玩家清场”逻辑二次传送与误提示。 */
     private final Map<UUID, Long> recentEliminations = new HashMap<>();
     private static final long ELIMINATION_GRACE_TICKS = 100L;
-    /** 对局中掉线的参战者：重新上线时按需求 108 送回大厅。 */
-    private final Set<UUID> disconnectedMembers = new HashSet<>();
     /** 对局中掉线的观战者：重新上线时仍为观战（需求 104），对局结束后回大厅。 */
     private final Set<UUID> disconnectedSpectators = new HashSet<>();
-    /** 准备房间内掉线的入队玩家：重新上线时传送至大厅（需求 39）。 */
-    private final Set<UUID> disconnectedPreppers = new HashSet<>();
+    /**
+     * 下次上线必须送回大厅的玩家（掉线的参战者、掉线的准备房间入队者、局外掉线的观战者）。
+     *
+     * <p><b>这张名单刻意不随对局结算清空</b>：登记发生在对局结束之前，而玩家可能在对局
+     * 结束之后才上线。此前的实现把标记放在会被 {@link #resetRuntimeState()} 清空的名单里，
+     * 于是“对局中掉线、结束后才上线”的玩家所有分支都落空，直接以登出坐标留在场地内。</p>
+     */
+    private final Set<UUID> pendingHall = new HashSet<>();
+    /** 掉线玩家的入场背包快照：离线期间写背包会被服务端覆盖，留到上线时再写回。 */
+    private final Map<UUID, ItemStack[]> disconnectedInventory = new HashMap<>();
 
     /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
     private boolean ended;
@@ -855,8 +861,30 @@ public final class GameEngine {
                 alerts.sendTo(player, messageKey, Map.of("player", player.getName()));
             }
         }
-        if (!ended) {
+        if (!ended && phase == GamePhase.RUNNING) {
             checkVictory();
+        }
+    }
+
+    /**
+     * 把玩家的入场背包备份从 {@code inventoryBackups} 挪到 {@code disconnectedInventory}。
+     *
+     * <p>离线期间写入背包会被服务端在保存玩家数据时覆盖，所以掉线时只做转移，
+     * 等玩家上线后再写回。</p>
+     */
+    private void takeInventoryBackup(Player player) {
+        ItemStack[] backup = inventoryBackups.remove(player.getUniqueId());
+        if (backup != null) {
+            disconnectedInventory.put(player.getUniqueId(), backup);
+        }
+    }
+
+    /** 上线时把掉线前扣留的入场背包写回。 */
+    private void restoreInventoryBackup(Player player) {
+        ItemStack[] backup = disconnectedInventory.remove(player.getUniqueId());
+        if (backup != null) {
+            player.getInventory().setContents(backup);
+            player.updateInventory();
         }
     }
 
@@ -956,27 +984,48 @@ public final class GameEngine {
      * 玩家掉线。
      *
      * <p>需求 108：参战者掉线即视为离开游戏——当场清空背包与药水效果、移出队伍，
-     * 并记入“掉线待处理”名单，上线时按需求送回大厅（而不是留在场地或误判成观战者）。</p>
+     * 并登记“下次上线送回大厅”，而不是靠队伍状态去猜。</p>
      */
     public void onQuit(Player player) {
         UUID uuid = player.getUniqueId();
+        boolean retiredFromGame = false;
+
         if (members.remove(uuid)) {
-            if (isActive()) {
+            // 只要不是空闲阶段就清理：ENDING 的那一 tick 也算本局，否则背包会留到下一局，
+            // 而入场备份会随 resetRuntimeState 一起丢掉，等于永久损失玩家物品
+            if (phase != GamePhase.IDLE) {
                 clearPlayerState(player);
             }
             teams.leaveAll(uuid);
             scoreboard.detach(player);
-            disconnectedMembers.add(uuid);
+            // 吞下背包备份：玩家上线时由 onJoin 写回（离线期间写 inventory 会被服务端覆盖）
+            takeInventoryBackup(player);
             alerts.broadcast("quit", Map.of("player", player.getName()));
-            checkVictory();
+            if (phase == GamePhase.RUNNING && !ended) {
+                checkVictory();
+            }
+            retiredFromGame = true;
         } else if (teams.inSpectatorTeam(uuid)) {
-            // 观战者掉线：对局中保留观战身份（需求 104），上线时回到观战点
-            disconnectedSpectators.add(uuid);
+            if (phase == GamePhase.RUNNING) {
+                // 需求 104：对局中掉线的观战者，上线后仍为观战
+                disconnectedSpectators.add(uuid);
+            } else {
+                teams.leaveAll(uuid);
+                retiredFromGame = true;
+            }
         }
+
+        // 需求 39 后半：准备房间内掉线同样退出队列，上线时传送至大厅
         if (queue.remove(uuid)) {
-            // 需求 39 后半：准备房间内掉线同样退出队列，上线时传送至大厅
-            disconnectedPreppers.add(uuid);
+            retiredFromGame = true;
         }
+
+        if (retiredFromGame) {
+            // 这张名单不随对局结算清空：否则“对局中掉线、对局结束后才上线”的玩家
+            // 会三条分支全落空，直接以登出坐标留在场地里
+            pendingHall.add(uuid);
+        }
+
         // 掉线者下一 tick 起不在准备房间内，同步名单避免被当成“仍在房间内”
         Set<UUID> current = new HashSet<>(prepRoster);
         current.remove(uuid);
@@ -986,32 +1035,35 @@ public final class GameEngine {
     /** 玩家上线。 */
     public void onJoin(Player player) {
         UUID uuid = player.getUniqueId();
-        // 需求 108：对局中掉线的参战者重新上线——清空背包与药水效果、移出队伍、传送至大厅
-        if (disconnectedMembers.remove(uuid)) {
-            teams.leaveAll(uuid);
-            scoreboard.detach(player);
-            player.setGameMode(GameMode.SURVIVAL);
-            teleport(player, config.settings().location("hall-spawn"));
-            alerts.sendTo(player, "player-arena-exit", Map.of("player", player.getName()));
-            return;
-        }
-        // 需求 104：对局中掉线的观战者重新上线仍为观战模式、仍在队伍 fmgz
+
+        // 需求 104：对局中掉线的观战者重新上线，仍为观战模式、仍在队伍 fmgz。
+        // 这一支必须先于 pendingHall 判定——观战者掉线时也会进 pendingHall，
+        // 但对局仍在进行时应当恢复观战，而不是被送回大厅
         if (disconnectedSpectators.remove(uuid)) {
+            pendingHall.remove(uuid);
             if (phase == GamePhase.RUNNING) {
                 player.setGameMode(GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
             } else {
+                player.setGameMode(GameMode.SURVIVAL);
                 teams.leaveAll(uuid);
                 scoreboard.detach(player);
-                player.setGameMode(GameMode.SURVIVAL);
                 teleport(player, config.settings().location("hall-spawn"));
             }
+            restoreInventoryBackup(player);
             return;
         }
-        // 需求 39：准备房间内掉线的玩家重新上线——传送至大厅
-        if (disconnectedPreppers.remove(uuid)) {
+
+        // 需求 108 / 39：对局中掉线的参战者、准备房间内掉线的入队玩家——
+        // 无论对局是否已结束，上线一律移出队伍、恢复生存模式并传送至大厅
+        if (pendingHall.remove(uuid)) {
+            player.setGameMode(GameMode.SURVIVAL);
+            teams.leaveAll(uuid);
+            scoreboard.detach(player);
             teleport(player, config.settings().location("hall-spawn"));
+            restoreInventoryBackup(player);
+            alerts.sendTo(player, "player-arena-exit", Map.of("player", player.getName()));
             return;
         }
 
@@ -1136,6 +1188,7 @@ public final class GameEngine {
         clearArenaEntities();
         shops.despawnAll();
         scoreboard.detachAll();
+        sendPendingHallToLobby();
         resetRuntimeState();
         alerts.broadcast("game-over", Map.of());
     }
@@ -1158,7 +1211,30 @@ public final class GameEngine {
         clearArenaEntities();
         shops.despawnAll();
         scoreboard.detachAll();
+        sendPendingHallToLobby();
         resetRuntimeState();
+    }
+
+    /**
+     * 兜底：若 pendingHall 里还有**在线**玩家，就地把他们送回大厅。
+     *
+     * <p>正常情况下这些人在掉线时已处理，上线时由 {@code onJoin} 处理；这里只覆盖
+     * “标记写下后玩家又上线、但走的不是 onJoin 路径”之类的边角情形，避免清场后
+     * 还有人留在场地里。名单本身刻意保留（跨对局生效）。</p>
+     */
+    private void sendPendingHallToLobby() {
+        for (UUID uuid : new ArrayList<>(pendingHall)) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null || !player.isOnline()) {
+                continue;
+            }
+            pendingHall.remove(uuid);
+            player.setGameMode(GameMode.SURVIVAL);
+            teams.leaveAll(uuid);
+            scoreboard.detach(player);
+            teleport(player, config.settings().locationOrNull("hall-spawn"));
+            restoreInventoryBackup(player);
+        }
     }
 
     /**
@@ -1175,9 +1251,7 @@ public final class GameEngine {
         outsiderNotice.clear();
         recentEliminations.clear();
         pendingRespawn.clear();
-        disconnectedMembers.clear();
         disconnectedSpectators.clear();
-        disconnectedPreppers.clear();
         inventoryBackups.clear();
         chests.clear();
         prepareClicks = 0;
@@ -1189,6 +1263,9 @@ public final class GameEngine {
         timer = null;
         ended = false;
         phase = GamePhase.IDLE;
+        // 刻意不清 pendingHall / disconnectedInventory：它们描述的是“离线玩家下次上线怎么处理”，
+        // 生命周期跨越对局边界。若在这里清空，对局中掉线、结束后才上线的玩家会失去标记，
+        // 直接以登出坐标留在场地里（需求 108 / 39 落空）。
     }
 
     /** 大厅传送点；未配置或世界未加载时返回 null。供重生点设置使用。 */
