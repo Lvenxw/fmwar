@@ -71,6 +71,7 @@ public final class FMWar extends JavaPlugin {
         }
 
         engine.onEnable();
+        reportShopReadiness();
 
         var validation = configManager.validation();
         if (!validation.ok()) {
@@ -91,5 +92,26 @@ public final class FMWar extends JavaPlugin {
     /** 供各服务读取物品解析器（奖励箱内容）。 */
     public LootParser lootParser() {
         return configManager == null ? null : configManager.lootParser();
+    }
+
+    /**
+     * 启动时汇总一次商店就绪情况。
+     *
+     * <p>商店是否已定义属于**部署前置条件**：它不会阻止插件启用，但没配好的话开局时
+     * 场地里不会出现村民。与其在开局逐条刷 WARN（或在停用时对不存在的商店调用 despawn
+     * 产生成对噪音），不如在启动时给一行明确结论，逐项状态交给 {@code /fmwar doctor}。</p>
+     */
+    private void reportShopReadiness() {
+        if (shopService == null || !shopService.available()) {
+            return;
+        }
+        var missing = shopService.findUndefinedShops();
+        if (missing.isEmpty()) {
+            getLogger().info("ExtraShop 集成就绪：配置的商店均已定义");
+        } else {
+            getLogger().warning("以下商店未在本服定义，开局时不会生成：" + String.join(", ", missing)
+                    + " —— 请用 /eshop 配置，或 /fmwar doctor 查看逐项状态"
+                    + "；不需要商店时可在 config.yml 设置 extra-shops.enabled=false");
+        }
     }
 }
