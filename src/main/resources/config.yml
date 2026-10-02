@@ -159,7 +159,7 @@ start:
   # 抗性提升（tick）
   resistance:
     enabled: true
-    duration-ticks: 100
+    duration-ticks: 200
     amplifier: 4
   # 回满血量与饱食度
   heal: true
@@ -290,7 +290,7 @@ messages:
   prepare-announce: '{war_prefix}&a准备完成，&f{seconds} &a秒后开始游戏'
   prepare-reset: '{prefix}&c有玩家进入准备房间，准备进度已重置'
   prepare-countdown: '{prefix}&e游戏将在 &f{seconds} &e秒后开始'
-  duel-teleport: '{prefix}&c剩余时间不足，已把你传送到决斗圈'
+  duel-teleport: '{prefix}&c决斗时间！'
   game-start: '{prefix}&a游戏开始！'
   game-already-running: '{prefix}&c游戏已经开始，暂时无法加入'
   spectator-unavailable: '{prefix}&c当前没有进行中的对局，无法观战'
