@@ -933,7 +933,7 @@ public final class GameEngine {
             lastDisperseReport = "已禁用或世界未加载，全部使用场地传送点";
             plugin.getLogger().warning("分散未执行（" + lastDisperseReport + "）");
             for (Player player : participants) {
-                teleport(player, settings.location("arena-spawn"));
+                teleport(player, levelView(player, settings.location("arena-spawn")));
             }
             return;
         }
@@ -950,7 +950,7 @@ public final class GameEngine {
                     taken, arena, referenceY);
             if (sample != null) {
                 taken.add(sample);
-                teleport(player, sample);
+                teleport(player, levelView(player, sample));
                 continue;
             }
             // 找不到合格点：异步加载该区块后再试一次，仍失败则退回场地传送点
@@ -963,12 +963,12 @@ public final class GameEngine {
                         taken, arena, referenceY);
                 if (retry != null) {
                     taken.add(retry);
-                    teleport(player, retry);
+                    teleport(player, levelView(player, retry));
                 } else {
                     plugin.getLogger().warning("玩家 " + player.getName() + " 未能找到分散落点（槽位 " + slot
                             + "），已退回场地传送点。请检查 regions.arena 是否覆盖分散范围、"
                             + "以及该范围内是否有可站立地面");
-                    teleport(player, settings.location("arena-spawn"));
+                    teleport(player, levelView(player, settings.location("arena-spawn")));
                 }
             }));
         }
@@ -987,11 +987,14 @@ public final class GameEngine {
     }
 
     /**
-     * 把存活玩家送进决斗圈。
+     * 把存活玩家与观战者送进决斗圈。
      *
      * <p>需求：到点时**随机选一个**决斗圈（duel-1 / duel-2），选定后本局所有存活玩家
      * 都进**同一个**圈；落点必须在该圈区域内、且不高于配置的高度上限
      * （室内场地的封顶玻璃会挡住“最高可落脚面”，必须靠上限把人压回场地内部）。</p>
+     *
+     * <p>观战者一并送进同一个圈，直接落在圈中心的安全位（{@code fallback}）：
+     * 旁观模式没有碰撞体积，多人重叠没有影响，集中在中心反而能看清对决。</p>
      */
     private void teleportToDuel() {
         Settings settings = config.settings();
@@ -1048,12 +1051,12 @@ public final class GameEngine {
                             arena.centerY(), effectiveMaxY, arena.allowWater());
             if (sample == null) {
                 fallbackCount++;
-                teleport(player, fallback);
+                teleport(player, levelView(player, fallback));
                 alerts.sendActionBarTo(player, "duel-teleport", Map.of());
                 continue;
             }
             taken.add(sample);
-            teleport(player, sample);
+            teleport(player, levelView(player, sample));
             alerts.sendActionBarTo(player, "duel-teleport", Map.of());
         }
 
@@ -1063,7 +1066,7 @@ public final class GameEngine {
         // 因此这里不会触发 checkArenaPresence 里的“观战者离场”。
         int spectators = 0;
         for (Player spectator : onlineSpectators()) {
-            teleport(spectator, fallback);
+            teleport(spectator, levelView(spectator, fallback));
             alerts.sendActionBarTo(spectator, "duel-teleport", Map.of());
             spectators++;
         }
@@ -1079,6 +1082,28 @@ public final class GameEngine {
                     + fallback.getBlockZ() + "）。请检查 regions." + arena.region()
                     + (exactY ? " 与 center 的 y" : " 与 max-y"));
         }
+    }
+
+    /**
+     * 把落点调整为“平视”：保留玩家当前的水平朝向（yaw），俯仰角（pitch）归零。
+     *
+     * <p>{@link SafeLocation} 采样出来的 Location 只保证坐标可用，yaw/pitch 是 0 或
+     * 沿用调用方给的参考值；直接传送会让玩家的视线被重置（常见是突然朝正南、略微俯视）。
+     * 这里统一在传送前改写，让玩家落地后立刻是水平视角。</p>
+     */
+    private Location levelView(Player player, Location target) {
+        if (target == null) {
+            return null;
+        }
+        Location leveled = target.clone();
+        leveled.setYaw(player.getLocation().getYaw());
+        leveled.setPitch(0F);
+        return leveled;
+    }
+
+    /** {@link #levelView(Player, Location)} 的 Position 版本；target 为 null 时原样返回。 */
+    private Location levelView(Player player, Position target) {
+        return target == null ? null : levelView(player, target.toLocation());
     }
 
     // ------------------------------------------------------------------
