@@ -153,11 +153,11 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         }
         for (var location : locations) {
             String coords = location.getBlockX() + "," + location.getBlockY() + "," + location.getBlockZ();
-            if (!(location.getBlock().getState() instanceof org.bukkit.block.Chest chest)) {
+            if (!(location.getBlock().getState(false) instanceof org.bukkit.block.Chest chest)) {
                 line(sender, "chest-not-chest", Map.of("coords", coords));
                 continue;
             }
-            var contents = chest.getInventory().getContents();
+            var contents = chest.getBlockInventory().getContents();
             int count = 0;
             StringBuilder names = new StringBuilder();
             for (var item : contents) {

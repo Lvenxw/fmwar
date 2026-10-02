@@ -14,7 +14,9 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
@@ -991,32 +993,36 @@ public final class GameEngine {
                 // setType 之后重新取一次方块引用，确保拿到新建的方块实体
                 block = location.getBlock();
             }
-            if (!(block.getState() instanceof Chest chest)) {
+            // 用**活的方块实体**（useSnapshot=false）而不是快照：
+            // 快照的改动必须靠 update() 写回，中间任何一步出错内容就丢了；
+            // 活体直接操作 chunk 里的方块实体，且能正确处理双箱（getInventory 返回整个双箱）
+            BlockState state = block.getState(false);
+            if (!(state instanceof Chest chest)) {
                 plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
                         + " 无法取得箱子方块实体（区块是否已加载？），已跳过");
                 continue;
             }
+            Inventory inventory = chest.getBlockInventory();
+
             List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
             List<ItemStack> items = plugin.lootParser().parseGroup(group, booksOnly);
             if (items.isEmpty()) {
                 plugin.getLogger().warning("奖励箱内容行解析后为空，该箱未放入任何物品：" + group
                         + " —— 多半是附魔键在本服未注册，可用 /fmwar doctor 查看");
             }
-            // 直接往箱子 Inventory 里放，再 update() 落盘（与官方示例一致）
-            for (ItemStack item : items) {
-                chest.getInventory().addItem(item);
+            for (int slot = 0; slot < items.size() && slot < inventory.getSize(); slot++) {
+                // 用 setItem 指定槽位，避免 addItem 在容量/堆叠判定上的意外
+                inventory.setItem(slot, items.get(slot));
             }
-            chest.update(true);
-
-            // 读回验证：写进去的内容必须能被重新读到，否则“已放入 N 件”只是一句空话。
-            // 这一步同时覆盖“内容确实写入方块实体”与“方块实体可再获取”两件事。
-            Chest verify = location.getBlock().getState() instanceof Chest state ? state : null;
-            int readBack = verify == null ? -1 : countItems(verify.getInventory().getContents());
+            // 活体写入后仍需 update() 通知客户端刷新方块实体视图
+            boolean updated = chest.update(true);
+            // 读回校验：直接看同一份活体 inventory，确认内容确实进去了
+            int readBack = countItems(inventory.getContents());
             if (readBack != items.size()) {
                 plugin.getLogger().warning("奖励箱写入校验失败：期望 " + items.size()
                         + " 件，读回 " + readBack + " 件（坐标 "
                         + position.x() + "," + position.y() + "," + position.z()
-                        + "，区块是否已保存？请把这条日志发给开发者）");
+                        + "，update 返回 " + updated + "。请把这条日志发给开发者）");
             }
 
             chests.add(block.getLocation());
@@ -1049,11 +1055,11 @@ public final class GameEngine {
         for (Location location : chests) {
             builder.append("\n  ").append(location.getBlockX()).append(',')
                     .append(location.getBlockY()).append(',').append(location.getBlockZ()).append(" -> ");
-            if (!(location.getBlock().getState() instanceof Chest chest)) {
+            if (!(location.getBlock().getState(false) instanceof Chest chest)) {
                 builder.append("不是箱子方块");
                 continue;
             }
-            ItemStack[] contents = chest.getInventory().getContents();
+            ItemStack[] contents = chest.getBlockInventory().getContents();
             int count = countItems(contents);
             if (count == 0) {
                 builder.append("空");
@@ -1704,6 +1710,8 @@ public final class GameEngine {
             plugin.getLogger().warning("传送目标世界未加载，玩家 " + player.getName() + " 未被传送");
             return;
         }
+        // 权限只在“这一次传送真正完成之前”保持打开；teleportAsync 的完成通知
+        // 才是关闭时机，提前关闭会让传送被领地插件拦掉
         residence.runWithAccess(() -> player.teleportAsync(location));
     }
 

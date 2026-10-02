@@ -7,6 +7,7 @@ import org.bukkit.plugin.Plugin;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 领地（Residence）权限联动。
@@ -50,42 +51,71 @@ public final class ResidenceService {
     }
 
     /**
-     * 在“临时放行领地”的前提下执行一个动作，动作结束立刻恢复。
+     * 在“临时放行领地”的前提下执行一个动作，动作**真正结束**时立刻恢复。
      *
-     * <p>用法是**按次**的：每次传送前打开、传送完成即关闭。这样领地权限在绝大多数时间
+     * <p>用法是**按次**的：每次传送前打开、传送完成后关闭。这样领地权限在绝大多数时间
      * 都保持服务器设定的常态（关闭），而不会因为一场对局持续几十分钟就一直敞着。</p>
      *
-     * @param action 需要放行的动作（通常是传送）
+     * @param action 需要放行的动作；返回值是“动作真正完成”的通知
+     * @return 打开与关闭是否都成功执行
      */
-    public void runWithAccess(Runnable action) {
+    public boolean runWithAccess(java.util.function.Supplier<CompletableFuture<?>> action) {
         if (action == null) {
-            return;
+            return false;
         }
         List<String> regions = allRegions();
         if (regions.isEmpty()) {
-            action.run();
-            return;
+            try {
+                action.get();
+                return true;
+            } catch (RuntimeException exception) {
+                return false;
+            }
         }
-        for (String region : regions) {
-            apply(region, true);
-        }
-        // 单个 tick 内不要立刻关闭：传送（尤其是异步传送）的权限校验可能在本 tick
-        // 稍后才执行，立刻关闭会让它刚好撞上“已关闭”。延迟 2 tick 再恢复，
-        // 间隔远小于玩家能穿过一道门的时间。
-        boolean delayed = scheduleClose(regions);
-        if (!delayed) {
-            // 调度器不可用（极端情况）时至少不要留下敞开的权限
-            closeAll(regions);
+        open(regions);
+        try {
+            CompletableFuture<?> completion = action.get();
+            if (completion == null) {
+                closeLater(regions);
+            } else {
+                // 关键：必须等动作**真正完成**再关闭。
+                // teleportAsync 要等目标区块加载完才落地，若提前关闭权限，
+                // 传送会被领地插件拦掉（表现为“点了加入游戏却留在原地”）。
+                completion.whenComplete((ignored, error) -> closeLater(regions));
+            }
+            return true;
+        } catch (RuntimeException exception) {
+            plugin.getLogger().warning("临时放行期间执行动作失败：" + exception.getMessage());
+            closeLater(regions);
+            return false;
         }
     }
 
-    /** 延迟关闭；返回是否成功排入调度。 */
-    private boolean scheduleClose(List<String> regions) {
+    /** 不关心完成通知的便捷重载。 */
+    public void runWithAccess(Runnable action) {
+        runWithAccess(() -> {
+            action.run();
+            return null;
+        });
+    }
+
+    private void open(List<String> regions) {
+        for (String region : regions) {
+            apply(region, true);
+        }
+    }
+
+    /**
+     * 推迟一个 tick 再关闭。
+     *
+     * <p>传送完成的回调与“玩家真正落地”之间还隔着一次服务端处理，立刻关闭可能刚好撞上
+     * 领地插件在下一 tick 的位置校验。1 tick（50ms）足够，且远小于玩家能穿过一道门的时间。</p>
+     */
+    private void closeLater(List<String> regions) {
         try {
             plugin.getServer().getScheduler().runTaskLater(plugin, () -> closeAll(regions), CLOSE_DELAY_TICKS);
-            return true;
         } catch (RuntimeException exception) {
-            return false;
+            closeAll(regions);
         }
     }
 
@@ -108,64 +138,18 @@ public final class ResidenceService {
     }
 
     /**
-     * 立即放行全部领地（停用/复位前不使用；仅保留给极端场景）。
+     * 停用/重载前的强制复位：把配置涉及的**全部**领地关回常态。
      *
-     * @deprecated 改用 {@link #runWithAccess(Runnable)}，避免权限长时间敞开
+     * <p>刻意不依赖“打开过什么”的记录：记录与真实状态一旦不同步（例如上一次关闭的调度
+     * 还没执行完就停用了插件），按记录复位就会漏掉一片领地。这里无条件把两张表都关掉，
+     * 代价只是停用时多两条指令。</p>
      */
-    @Deprecated
-    public void acquire(String region) {
-        if (region == null || region.isBlank() || !enabled()) {
-            return;
-        }
-        int count = opened.merge(region, 1, Integer::sum);
-        if (count == 1) {
-            apply(region, true);
-        }
-    }
-
-    /** 释放一次申请；计数归零时关闭权限。 */
-    public void release(String region) {
-        if (region == null || region.isBlank() || !enabled()) {
-            return;
-        }
-        Integer count = opened.get(region);
-        if (count == null) {
-            return;
-        }
-        if (count <= 1) {
-            opened.remove(region);
-            apply(region, false);
-        } else {
-            opened.put(region, count - 1);
-        }
-    }
-
-    /**
-     * 进入某个场景：按配置把该场景涉及的领地全部打开。
-     *
-     * @deprecated 改用 {@link #runWithAccess(Runnable)}；常驻打开会让权限在对局期间一直敞开
-     */
-    @Deprecated
-    public void enter(String context) {
-        for (String region : regionsFor(context)) {
-            acquire(region);
-        }
-    }
-
-    /** 离开某个场景：把该场景涉及的领地全部释放。 */
-    public void exit(String context) {
-        for (String region : regionsFor(context)) {
-            release(region);
-        }
-    }
-
-    /** 停用/重载前的强制复位：关闭所有仍被本插件打开的权限。 */
     public void reset() {
-        for (String region : List.copyOf(opened.keySet())) {
-            opened.remove(region);
+        for (String region : allRegions()) {
             apply(region, false);
         }
         opened.clear();
+        lastApplied.clear();
     }
 
     /** 当前被本插件打开权限的领地（诊断用）。 */
@@ -173,25 +157,23 @@ public final class ResidenceService {
         return Map.copyOf(opened);
     }
 
-    private List<String> regionsFor(String context) {
-        Settings.Residence settings = config.settings().residence();
-        return switch (context) {
-            case "prep" -> settings.prepRegions();
-            case "arena" -> settings.arenaRegions();
-            default -> List.of();
-        };
-    }
-
     /** 真正下发权限变更。 */
     private void apply(String region, boolean allow) {
         String flag = config.settings().residence().flag();
         String value = allow ? "true" : "false";
-        // 记录“打开过什么”，停用时才能准确复位，而不是盲目关闭
+        // 同值不重复下发：传送很频繁，避免每次传送都刷两条一样的日志与指令
+        String previous = lastApplied.get(region);
+        if (value.equals(previous)) {
+            return;
+        }
         lastApplied.put(region, value);
         String command = "res set " + region + " " + flag + " " + value;
         try {
             boolean ok = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command);
-            plugin.getLogger().info("领地权限调整：" + command + (ok ? "（成功）" : "（指令返回 false，请确认领地名与 flag 是否存在）"));
+            if (!ok) {
+                plugin.getLogger().warning("领地权限调整：" + command
+                        + " 指令返回 false，请确认领地名与 flag 是否存在");
+            }
         } catch (RuntimeException exception) {
             plugin.getLogger().warning("领地权限调整失败：" + command + " -> " + exception.getMessage());
         }
