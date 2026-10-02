@@ -20,6 +20,7 @@ import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
@@ -652,13 +653,26 @@ public final class GameEngine {
     }
 
     public boolean tryJoinQueue(Player player) {
+        // 先判阶段：对局已经开打（含正在结算的那一 tick）时直接拒绝，
+        // 避免下面为“准备倒计时期间的加入”取消倒计时这件事被误触发。
+        if (phase != GamePhase.IDLE && phase != GamePhase.PREPARING) {
+            alerts.sendTo(player, "game-already-running", Map.of());
+            return false;
+        }
+
+        // 需求：入队前必须清空背包（含光标上的物品）。
+        // 检查刻意放在 cancelCountdown 之前：一次无效点击不该把正在跑的倒计时取消掉，
+        // 也不该让玩家带着上一局的装备进入准备房间。
+        if (hasAnyItem(player)) {
+            debug("玩家 " + player.getName() + " 入队被拒：背包未清空");
+            alerts.sendTo(player, "queue-inventory-not-empty", Map.of());
+            return false;
+        }
+
         // 需求：准备倒计时期间也允许加入队列——新玩家进入意味着“有人进入准备房间”，
         // 此时应当取消倒计时并重置准备进度，而不是把大厅里的人挡在门外。
         if (phase == GamePhase.PREPARING) {
             cancelCountdown("prepare-cancel-joined");
-        } else if (phase != GamePhase.IDLE) {
-            alerts.sendTo(player, "game-already-running", Map.of());
-            return false;
         }
         UUID uuid = player.getUniqueId();
         if (queue.contains(uuid)) {
@@ -697,6 +711,25 @@ public final class GameEngine {
                     alerts.broadcast("queue-leave", Map.of("player", name));
                 }));
         return true;
+    }
+
+    /**
+     * 玩家身上是否有任何物品。
+     *
+     * <p>用 {@link PlayerInventory#getContents()} 整体判定：它同时覆盖主背包、快捷栏、
+     * 护甲与副手，比只看 {@code getStorageContents()} 更贴近“背包已经清空”的语义，
+     * 也正好对应 {@code applyStartState} / {@code clearPlayerState} 里
+     * {@code getInventory().clear()} 的清理范围。光标上的物品不属于容器内容，
+     * 需要单独判一次。</p>
+     */
+    private boolean hasAnyItem(Player player) {
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (item != null && !item.getType().isAir()) {
+                return true;
+            }
+        }
+        ItemStack cursor = player.getItemOnCursor();
+        return cursor != null && !cursor.getType().isAir();
     }
 
     /**
