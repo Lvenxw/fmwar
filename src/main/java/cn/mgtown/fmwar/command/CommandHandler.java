@@ -37,7 +37,7 @@ import java.util.UUID;
 public final class CommandHandler implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS =
-            List.of("reload", "start", "stop", "status", "doctor", "button", "points", "debug", "time");
+            List.of("reload", "start", "stop", "status", "doctor", "button", "points", "debug", "time", "chest");
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -81,6 +81,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "points" -> points(sender, args);
             case "debug" -> debug(sender);
             case "time" -> time(sender, args);
+            case "chest" -> chest(sender);
             default -> usage(sender, label);
         }
         return true;
@@ -135,6 +136,49 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             return;
         }
         line(sender, "time-set", Map.of("seconds", Integer.toString(seconds)));
+    }
+
+    /**
+     * {@code /fmwar chest} —— 读回当前奖励箱的实际内容。
+     *
+     * <p>这是排查“箱子是空的”最快的手段：它读的是**方块实体里真实存在的内容**，
+     * 而不是写入时的记录，因此能直接区分“没写进去”和“写了但没保存”。</p>
+     */
+    private void chest(CommandSender sender) {
+        var locations = engine.chestLocations();
+        line(sender, "chest-title", Map.of("count", Integer.toString(locations.size())));
+        if (locations.isEmpty()) {
+            line(sender, "chest-none", Map.of());
+            return;
+        }
+        for (var location : locations) {
+            String coords = location.getBlockX() + "," + location.getBlockY() + "," + location.getBlockZ();
+            if (!(location.getBlock().getState() instanceof org.bukkit.block.Chest chest)) {
+                line(sender, "chest-not-chest", Map.of("coords", coords));
+                continue;
+            }
+            var contents = chest.getInventory().getContents();
+            int count = 0;
+            StringBuilder names = new StringBuilder();
+            for (var item : contents) {
+                if (item == null || item.getType().isAir()) {
+                    continue;
+                }
+                count++;
+                if (names.length() > 0) {
+                    names.append("、");
+                }
+                names.append(item.getType().name()).append('x').append(item.getAmount());
+            }
+            if (count == 0) {
+                line(sender, "chest-empty", Map.of("coords", coords));
+            } else {
+                line(sender, "chest-line", Map.of(
+                        "coords", coords,
+                        "count", Integer.toString(count),
+                        "items", names.toString()));
+            }
+        }
     }
 
     /** {@code /fmwar debug} —— 切换准备/队列链路的详细日志（排查按钮与倒计时问题）。 */

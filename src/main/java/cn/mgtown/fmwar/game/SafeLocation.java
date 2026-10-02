@@ -31,9 +31,9 @@ public final class SafeLocation {
     /**
      * 在给定 x/z 上寻找最高可落脚点；失败返回 null。
      *
-     * @param referenceY 搜索参考高度：&gt; 0 时从该高度向下找（配置里 center 的 y 就用于此），
-     *                   &lt;= 0 时改从世界最高点向下找。两种方式都只影响搜索**起点**，
-     *                   结果仍是该 x/z 上最高的可落脚面，因此省略 y 不会改变落点。
+     * <p>无论是否给了参考高度，落点都取该 x/z 上**最高的可落脚面**——也就是
+     * “最高方块的上表面”，绝不会落到房子内部。参考高度只用来跳过无意义的搜索区间
+     * （起点不会高于世界最高点），因此它不改变最终结果。</p>
      */
     public static Location find(World world, double x, double z, double referenceY) {
         if (world == null) {
@@ -41,9 +41,13 @@ public final class SafeLocation {
         }
         int blockX = (int) Math.floor(x);
         int blockZ = (int) Math.floor(z);
-        int startY = referenceY > 0
-                ? Math.min(world.getMaxHeight() - 2, (int) Math.floor(referenceY))
-                : Math.min(world.getMaxHeight() - 2, world.getHighestBlockYAt(blockX, blockZ) + 1);
+        // 起点一律取世界最高点：需求要求“最高可落脚点”，若从配置的 y 往下找，
+        // 而该 y 低于房顶，就会落到房子内部——这正是曾经的错误。
+        int startY = Math.min(world.getMaxHeight() - 2, world.getHighestBlockYAt(blockX, blockZ) + 1);
+        if (referenceY > 0) {
+            // 参考高度只用于“抬高起点上限”的语义保留（例如场地整体高于世界最高点时）
+            startY = Math.min(world.getMaxHeight() - 2, Math.max(startY, (int) Math.floor(referenceY)));
+        }
         for (int y = startY; y > world.getMinHeight(); y--) {
             Block ground = world.getBlockAt(blockX, y, blockZ);
             if (ground.isLiquid() || ground.isEmpty()) {

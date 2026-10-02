@@ -612,10 +612,7 @@ public final class GameEngine {
     /** 右键返回大厅按钮：退出队列并回大厅。 */
     public void leaveToHall(Player player) {
         queue.remove(player.getUniqueId());
-        // 队列空了就把准备房间的领地权限恢复为常态关闭
-        if (queue.isEmpty()) {
-            residence.exit("prep");
-        }
+        // 传送本身由 teleport() 临时放行后立即恢复，这里不需要额外处理领地权限
         teleport(player, config.settings().location("hall-spawn"));
         teams.leaveAll(player.getUniqueId());
         scoreboard.detach(player);
@@ -658,9 +655,8 @@ public final class GameEngine {
             return false;
         }
         queue.add(player.getUniqueId());
-        // 需求：准备房间的领地常态关闭传送权限。为了把玩家送进去，
-        // 先在入队期间临时打开该领地的权限（队列清空时恢复）。
-        residence.enter("prep");
+        // 需求：准备房间的领地常态关闭传送权限。传送本身走 teleport()，
+        // 它会在传送期间临时放行、传送完成立刻恢复，因此这里不需要常驻打开权限。
         teleport(player, config.settings().location("prep-spawn"));
         // 入队即挂上本插件的记分板：准备倒计时与进度的常驻显示依赖它
         scoreboard.attach(player, config.settings());
@@ -734,10 +730,8 @@ public final class GameEngine {
     private void beginGame() {
         Settings settings = config.settings();
         scoreboard.hideCountdown();
-        // 队列即将清空：恢复准备房间领地的常态关闭；同时打开场地领地，
-        // 供开局分散、传决斗圈、观战进场使用（对局结束时恢复）
-        residence.exit("prep");
-        residence.enter("arena");
+        // 领地权限不在这里常驻打开：开局分散、传决斗圈、观战进场各自走 teleport()，
+        // 由它在每次传送期间临时放行、传送完成立刻恢复
         phase = GamePhase.RUNNING;
         timer = new Timer(GamePhase.RUNNING, Bukkit.getCurrentTick(), settings.timing().gameDurationSeconds() * 20L);
         members.clear();
@@ -917,6 +911,13 @@ public final class GameEngine {
                 + " 正方形半边长 " + (long) disperse.radius()
                 + "，最小间距 " + (long) disperse.minSpacing()
                 + (fallback > 0 ? "，" + fallback + " 人走异步重试" : "") + "）";
+        // 逐人记录落点：确认落的是“该位置最高可落脚点”而不是房子内部
+        for (Player player : participants) {
+            Location at = player.getLocation();
+            debug("分散落点 " + player.getName() + " -> "
+                    + at.getBlockX() + "," + at.getBlockY() + "," + at.getBlockZ()
+                    + "（最高方块 y=" + world.getHighestBlockYAt(at.getBlockX(), at.getBlockZ()) + "）");
+        }
     }
 
     private void teleportToDuel() {
@@ -1005,7 +1006,19 @@ public final class GameEngine {
             for (ItemStack item : items) {
                 chest.getInventory().addItem(item);
             }
-            chest.update();
+            chest.update(true);
+
+            // 读回验证：写进去的内容必须能被重新读到，否则“已放入 N 件”只是一句空话。
+            // 这一步同时覆盖“内容确实写入方块实体”与“方块实体可再获取”两件事。
+            Chest verify = location.getBlock().getState() instanceof Chest state ? state : null;
+            int readBack = verify == null ? -1 : countItems(verify.getInventory().getContents());
+            if (readBack != items.size()) {
+                plugin.getLogger().warning("奖励箱写入校验失败：期望 " + items.size()
+                        + " 件，读回 " + readBack + " 件（坐标 "
+                        + position.x() + "," + position.y() + "," + position.z()
+                        + "，区块是否已保存？请把这条日志发给开发者）");
+            }
+
             chests.add(block.getLocation());
             placed++;
             totalItems += items.size();
@@ -1013,6 +1026,52 @@ public final class GameEngine {
         plugin.getLogger().info("奖励箱：已生成 " + placed + "/" + loot.chestLocations().size()
                 + " 个，共放入 " + totalItems + " 件"
                 + (booksOnly ? "附魔书" : "物品"));
+        debug("奖励箱明细：" + describeChests());
+    }
+
+    /** 统计非空物品数量。 */
+    private int countItems(ItemStack[] contents) {
+        int count = 0;
+        for (ItemStack item : contents) {
+            if (item != null && !item.getType().isAir()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** 逐个箱子列出当前实际内容（读回，不是写入时的记录）。 */
+    public String describeChests() {
+        if (chests.isEmpty()) {
+            return "本次对局没有生成任何奖励箱";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (Location location : chests) {
+            builder.append("\n  ").append(location.getBlockX()).append(',')
+                    .append(location.getBlockY()).append(',').append(location.getBlockZ()).append(" -> ");
+            if (!(location.getBlock().getState() instanceof Chest chest)) {
+                builder.append("不是箱子方块");
+                continue;
+            }
+            ItemStack[] contents = chest.getInventory().getContents();
+            int count = countItems(contents);
+            if (count == 0) {
+                builder.append("空");
+                continue;
+            }
+            builder.append(count).append(" 件：");
+            for (ItemStack item : contents) {
+                if (item != null && !item.getType().isAir()) {
+                    builder.append(item.getType().name()).append('x').append(item.getAmount()).append(' ');
+                }
+            }
+        }
+        return builder.toString();
+    }
+
+    /** 奖励箱坐标列表（供指令读回校验）。 */
+    public List<Location> chestLocations() {
+        return List.copyOf(chests);
     }
 
     private void clearChests() {
@@ -1633,13 +1692,19 @@ public final class GameEngine {
         teleport(player, target.toLocation());
     }
 
-    /** 传送（目标世界未加载时记录日志并保持原地）。 */
+    /**
+     * 传送（目标世界未加载时记录日志并保持原地）。
+     *
+     * <p><b>领地权限按次放行</b>：传送前临时打开相关领地的权限，传送完成后立刻恢复常态。
+     * 这样准备房间（FM.zb）与场地（FM）的传送权限在绝大多数时间都是关闭的，
+     * 玩家无法自行传进去；只有本插件把人送进去的那一瞬间是开的。</p>
+     */
     public void teleport(Player player, Location location) {
         if (location == null) {
             plugin.getLogger().warning("传送目标世界未加载，玩家 " + player.getName() + " 未被传送");
             return;
         }
-        player.teleportAsync(location);
+        residence.runWithAccess(() -> player.teleportAsync(location));
     }
 
     private Set<UUID> playersInRegion(Region region) {

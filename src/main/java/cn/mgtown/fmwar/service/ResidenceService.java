@@ -24,6 +24,9 @@ import java.util.Map;
  */
 public final class ResidenceService {
 
+    /** 临时放行后延迟关闭的 tick 数（2 tick = 100ms，足够覆盖传送的权限校验）。 */
+    private static final long CLOSE_DELAY_TICKS = 2L;
+
     private final Plugin plugin;
     private final ConfigService config;
 
@@ -47,10 +50,69 @@ public final class ResidenceService {
     }
 
     /**
-     * 申请打开某片领地的传送权限。
+     * 在“临时放行领地”的前提下执行一个动作，动作结束立刻恢复。
      *
-     * @param region 领地名（如 {@code FM.zb}）
+     * <p>用法是**按次**的：每次传送前打开、传送完成即关闭。这样领地权限在绝大多数时间
+     * 都保持服务器设定的常态（关闭），而不会因为一场对局持续几十分钟就一直敞着。</p>
+     *
+     * @param action 需要放行的动作（通常是传送）
      */
+    public void runWithAccess(Runnable action) {
+        if (action == null) {
+            return;
+        }
+        List<String> regions = allRegions();
+        if (regions.isEmpty()) {
+            action.run();
+            return;
+        }
+        for (String region : regions) {
+            apply(region, true);
+        }
+        // 单个 tick 内不要立刻关闭：传送（尤其是异步传送）的权限校验可能在本 tick
+        // 稍后才执行，立刻关闭会让它刚好撞上“已关闭”。延迟 2 tick 再恢复，
+        // 间隔远小于玩家能穿过一道门的时间。
+        boolean delayed = scheduleClose(regions);
+        if (!delayed) {
+            // 调度器不可用（极端情况）时至少不要留下敞开的权限
+            closeAll(regions);
+        }
+    }
+
+    /** 延迟关闭；返回是否成功排入调度。 */
+    private boolean scheduleClose(List<String> regions) {
+        try {
+            plugin.getServer().getScheduler().runTaskLater(plugin, () -> closeAll(regions), CLOSE_DELAY_TICKS);
+            return true;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    private void closeAll(List<String> regions) {
+        for (String region : regions) {
+            apply(region, false);
+        }
+    }
+
+    /** 配置里涉及的全部领地（准备房间 + 场地）。 */
+    private List<String> allRegions() {
+        Settings.Residence settings = config.settings().residence();
+        List<String> regions = new java.util.ArrayList<>(settings.prepRegions());
+        for (String region : settings.arenaRegions()) {
+            if (!regions.contains(region)) {
+                regions.add(region);
+            }
+        }
+        return regions;
+    }
+
+    /**
+     * 立即放行全部领地（停用/复位前不使用；仅保留给极端场景）。
+     *
+     * @deprecated 改用 {@link #runWithAccess(Runnable)}，避免权限长时间敞开
+     */
+    @Deprecated
     public void acquire(String region) {
         if (region == null || region.isBlank() || !enabled()) {
             return;
@@ -81,8 +143,9 @@ public final class ResidenceService {
     /**
      * 进入某个场景：按配置把该场景涉及的领地全部打开。
      *
-     * @param context {@code prep} 或 {@code arena}
+     * @deprecated 改用 {@link #runWithAccess(Runnable)}；常驻打开会让权限在对局期间一直敞开
      */
+    @Deprecated
     public void enter(String context) {
         for (String region : regionsFor(context)) {
             acquire(region);
