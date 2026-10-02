@@ -41,4 +41,18 @@ public final class PrepRoom {
     public static boolean shouldResetProgress(Set<UUID> previous, Set<UUID> current, int prepareClicks) {
         return prepareClicks > 0 && !entrants(previous, current).isEmpty();
     }
+
+    /**
+     * 倒计时是否应当因为人数不足而取消。
+     *
+     * <p>这条判定曾被误写成“只要处于倒计时就取消”，结果倒计时刚起步就被重置，
+     * 表现为“准备完成 → 人数不足重置”反复循环。抽成纯函数并加断言，
+     * 就是为了让这个条件不可能再被漏掉。</p>
+     *
+     * @param queuedInRoom 准备房间内**已入队**的人数
+     * @param required     开局所需的最少人数（当前规则为 2）
+     */
+    public static boolean shouldCancelCountdown(int queuedInRoom, int required) {
+        return queuedInRoom < required;
+    }
 }

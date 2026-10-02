@@ -312,11 +312,11 @@ public final class GameEngine {
             return;
         }
         if (timer != null) {
-            // 倒计时期间人数不足两人：取消倒计时并重置进度。
-            // 这条必须在这里兜住：玩家在倒计时中返回大厅时，队列会先变少，
-            // 而 syncPrepRoster 里那次判定可能被“名单未变化”提前 return 跳过，
-            // 于是只剩一个人的倒计时会一直挂着（表现为“卡住”）。
-            if (queuedInRoom() < 2) {
+            // 倒计时期间准备房间内已入队人数不足两人：取消倒计时并重置进度。
+            // 这是**唯一**的取消判定点（此前 syncPrepRoster 里也有一份，且被误写成无条件取消）。
+            int queued = queuedInRoom();
+            if (PrepRoom.shouldCancelCountdown(queued, 2)) {
+                debug("倒计时被取消：准备房间内已入队人数降到 " + queued + " 人");
                 cancelCountdown("prepare-cancel-not-enough");
                 return;
             }
@@ -331,7 +331,7 @@ public final class GameEngine {
             scoreboard.showCountdown(text, progress, viewers);
             if (remaining != lastCountdownSecond) {
                 lastCountdownSecond = remaining;
-                debug("准备倒计时：剩余 " + remaining + " 秒（房间内已入队 " + queuedInRoom() + " 人）");
+                debug("准备倒计时：剩余 " + remaining + " 秒（房间内已入队 " + queued + " 人）");
                 for (Player player : viewers) {
                     alerts.sendActionBarTo(player, "prepare-countdown",
                             Map.of("seconds", Long.toString(remaining)));
@@ -521,8 +521,8 @@ public final class GameEngine {
         }
 
         if (timer != null) {
-            // 倒计时期间的取消判定统一走 cancelCountdown（含提示与隐藏显示条）
-            cancelCountdown("prepare-cancel-not-enough");
+            // 倒计时在跑：本轮只做名单同步，是否取消交给 tickPreparing 统一判定
+            //（取消需要“人数不足”这个条件，绝不能无条件取消——那会让倒计时刚起步就被重置）
             return;
         }
 
