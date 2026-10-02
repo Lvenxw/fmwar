@@ -50,6 +50,7 @@
 | `/fmwar start` | `fmwar.admin` | 跳过准备按钮,把准备房间内已入队玩家直接拉入对局(调试用) |
 | `/fmwar stop` | `fmwar.admin` | 中止当前对局并清场 |
 | `/fmwar debug` | `fmwar.admin` | 开关准备/队列链路的详细日志（排查按钮没反应、倒计时不启动） |
+| `/fmwar time <秒数>` | `fmwar.admin` | 直接修改当前对局的剩余时间（测试用，免去干等） |
 
 权限:`fmwar.admin` 默认仅 OP;`fmwar.play`(点按钮)默认所有人。
 
@@ -100,6 +101,23 @@
   管理用 `/fmwar points set|add|remove|reset`(见指令表)。
 - 记分板侧栏**数值写在记分值上**:显示为「剩余时间 …… 900」「存活人数 …… 2」。
   想让剩余时间变成 `mm:ss`,把 `scoreboard.time-seconds` 设为 `false`。
+
+### 领地（Residence）权限联动
+
+准备房间与场地的领地在服务器上**常态关闭传送权限**（否则玩家能自己传进场地）。
+本插件只在真正需要时临时打开、用完立刻恢复，配置在 `residence` 段：
+
+| 场景 | 行为 |
+| --- | --- |
+| 有人进入队列 | 打开 `residence.prep-regions`（如 `FM.zb`），把玩家送进准备房间 |
+| 队列清空（返回大厅 / 开局） | 恢复为常态关闭 |
+| 对局开始 | 打开 `residence.arena-regions`（如 `FM`），供开局分散、传决斗圈、观战进场 |
+| 对局结束 / 插件停用 | 强制复位，绝不把临时打开的状态留在服务器上 |
+
+- `residence.flag` 默认 `move`：它才是“能不能进出这片领地”的实际生效项
+  （`tp` 只约束领地自身的 `/res tp` 指令，对插件传送无效）。
+- 未安装 Residence 时整段自动跳过。
+- 每次调整都会在控制台打印 `领地权限调整：res set FM.zb move true（成功）`，便于核对。
 
 ### 关于物品
 
