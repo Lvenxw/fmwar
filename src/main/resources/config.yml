@@ -298,7 +298,7 @@ scoreboard:
 messages:
   # 是否把高频状态提示同时发到动作栏（true 时聊天栏只保留关键事件）
   actionbar: true
-  queue-inventory-not-empty: '{war_prefix}&c请先清空背包（包括光标上的物品）再加入游戏队列。'
+  queue-inventory-not-empty: '{war_prefix}&c请先清空背包再加入游戏队列。'
   queue-join: '{prefix}&a{player} &7加入游戏队列'
   queue-leave: '{prefix}&c{player} &7退出游戏队列'
   queue-teleport-failed: '{prefix}&c传送被拦截（领地权限不足），已退出队列。'
