@@ -8,6 +8,8 @@ import cn.mgtown.fmwar.service.GameScoreboard;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
 import cn.mgtown.fmwar.util.TimeUtil;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -18,6 +20,7 @@ import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
@@ -1011,8 +1014,21 @@ public final class GameEngine {
                         + " —— 多半是附魔键在本服未注册，可用 /fmwar doctor 查看");
             }
             for (int slot = 0; slot < items.size() && slot < inventory.getSize(); slot++) {
-                // 用 setItem 指定槽位，避免 addItem 在容量/堆叠判定上的意外
-                inventory.setItem(slot, items.get(slot));
+                ItemStack item = items.get(slot);
+                if (item == null || item.getType().isAir()) {
+                    continue;
+                }
+                if (booksOnly && item.getType() == Material.ENCHANTED_BOOK) {
+                    ItemMeta meta = item.getItemMeta();
+                    if (meta != null) {
+                        meta.displayName(
+                                Component.translatable("item.minecraft.enchanted_book")
+                                        .decoration(TextDecoration.ITALIC, false)  // 自定义名默认斜体，这里去掉
+                        );
+                        item.setItemMeta(meta);
+                    }
+                }
+                inventory.setItem(slot, item);
             }
             // 活体写入后仍需 update() 通知客户端刷新方块实体视图
             boolean updated = chest.update(true);

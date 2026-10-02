@@ -10,12 +10,16 @@ import cn.mgtown.fmwar.service.PointsService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
 import cn.mgtown.fmwar.util.TimeUtil;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -168,7 +172,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
                 if (names.length() > 0) {
                     names.append("、");
                 }
-                names.append(item.getType().name()).append('x').append(item.getAmount());
+                names.append(displayNameOf(item)).append('x').append(item.getAmount());
             }
             if (count == 0) {
                 line(sender, "chest-empty", Map.of("coords", coords));
@@ -179,6 +183,15 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
                         "items", names.toString()));
             }
         }
+    }
+
+    private String displayNameOf(ItemStack item) {
+        var meta = item.getItemMeta();
+        Component name = (meta != null && meta.hasDisplayName())
+                ? meta.displayName()
+                : Component.translatable(item.getType().translationKey())
+                  .decoration(TextDecoration.ITALIC, false);
+        return MiniMessage.miniMessage().serialize(name);
     }
 
     /** {@code /fmwar debug} —— 切换准备/队列链路的详细日志（排查按钮与倒计时问题）。 */
