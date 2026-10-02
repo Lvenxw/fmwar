@@ -148,6 +148,9 @@ public final class GameEngine {
      */
     private boolean debug;
 
+    /** 决斗圈的随机选择器（本局选定后不再变化，保证所有人进同一个圈）。 */
+    private final java.util.Random duelRandom = new java.util.Random();
+
     private BukkitTask tickTask;
 
     public GameEngine(FMWar plugin, ConfigService config, AlertService alerts,
@@ -233,7 +236,9 @@ public final class GameEngine {
         Settings.Disperse disperse = config.settings().disperse();
         chunks.add(chunkKey((int) Math.floor(disperse.centerX()) >> 4, (int) Math.floor(disperse.centerZ()) >> 4));
         Settings.Duel duel = config.settings().duel();
-        chunks.add(chunkKey((int) Math.floor(duel.centerX()) >> 4, (int) Math.floor(duel.centerZ()) >> 4));
+        for (Settings.DuelArena arena : duel.arenas()) {
+            chunks.add(chunkKey((int) Math.floor(arena.centerX()) >> 4, (int) Math.floor(arena.centerZ()) >> 4));
+        }
 
         int loaded = 0;
         for (long key : chunks) {
@@ -948,43 +953,66 @@ public final class GameEngine {
         }
     }
 
+    /**
+     * 把存活玩家送进决斗圈。
+     *
+     * <p>需求：到点时**随机选一个**决斗圈（duel-1 / duel-2），选定后本局所有存活玩家
+     * 都进**同一个**圈；落点必须在该圈区域内、且不高于配置的高度上限
+     * （室内场地的封顶玻璃会挡住“最高可落脚面”，必须靠上限把人压回场地内部）。</p>
+     */
     private void teleportToDuel() {
         Settings settings = config.settings();
-        Settings.Duel duel = settings.duel();
         World target = world;
         if (target == null) {
             return;
         }
-        // 决斗圈的硬约束：必须是配置的 duel-1 区域。
-        Region duelRegion = settings.optionalRegion("duel-1");
-        if (duelRegion == null) {
-            plugin.getLogger().warning("regions.duel-1 未配置，决斗圈传送已跳过（玩家保持在原地）");
+        Settings.DuelArena arena = settings.duel().pick(duelRandom);
+        if (arena == null) {
+            plugin.getLogger().warning("未配置任何决斗圈（duel.arenas），决斗圈传送已跳过");
             return;
         }
+        Region duelRegion = settings.optionalRegion(arena.region());
+        if (duelRegion == null) {
+            plugin.getLogger().warning("regions." + arena.region()
+                    + " 未配置，决斗圈传送已跳过（玩家保持在原地）");
+            return;
+        }
+        debug("本局决斗圈：" + arena.region() + "（落点区域 x [" + (long) duelRegion.minX()
+                + "," + (long) duelRegion.maxX() + "] z [" + (long) duelRegion.minZ()
+                + "," + (long) duelRegion.maxZ() + "]，高度上限 " + (long) arena.maxY()
+                + "，允许水面 " + arena.allowWater() + "）");
 
-        // 采样失败时的兜底落点：决斗圈中心，至少保证在圈内
-        Location duelCenter = new Location(target,
-                duel.centerX() + 0.5, duel.centerY(), duel.centerZ() + 0.5);
+        // 兜底落点：该圈区域内、上限之下的一个安全点（而不是别的场地传送点）
+        Location fallback = SafeLocation.find(target, arena.centerX(), arena.centerZ(),
+                arena.centerY(), arena.maxY(), arena.allowWater());
+        if (fallback == null) {
+            fallback = new Location(target, arena.centerX() + 0.5,
+                    Math.max(duelRegion.minY() + 1, arena.centerY()), arena.centerZ() + 0.5);
+        }
 
         List<Location> taken = new ArrayList<>();
+        int fallbackCount = 0;
         for (Player player : onlineMembers()) {
-            // 需求：决斗圈是**以中心为心的正方形**（半边长=半径），不是圆
-            Location sample = SafeLocation.sampleSquare(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, duelRegion, duel.centerY());
-            // 二次校验：sampleSquare 的区域约束严格程度视实现而异，越界点直接丢弃，
-            // 避免“名义上在圈内、实际在圈外”。
-            if (sample != null && !duelRegion.contains(sample)) {
-                sample = null;
-            }
+            // 在**该区域的整个范围**内取点，而不是“中心 ± 半径”的正方形：
+            // 决斗圈区域多为长方形，正方形采样会有死角且容易越界
+            Location sample = SafeLocation.sampleRegion(target, duelRegion,
+                    arena.minSpacing(), arena.maxAttempts(), taken,
+                    arena.centerY(), arena.maxY(), arena.allowWater());
             if (sample == null) {
-                // 兜底到决斗圈中心，而不是 arena-spawn
-                teleport(player, duelCenter);
+                fallbackCount++;
+                teleport(player, fallback);
                 alerts.sendActionBarTo(player, "duel-teleport", Map.of());
                 continue;
             }
             taken.add(sample);
             teleport(player, sample);
             alerts.sendActionBarTo(player, "duel-teleport", Map.of());
+        }
+        if (fallbackCount > 0) {
+            plugin.getLogger().warning("决斗圈：" + fallbackCount + " 名玩家未能采样到落点，"
+                    + "已使用兜底点（" + fallback.getBlockX() + "," + fallback.getBlockY() + ","
+                    + fallback.getBlockZ() + "）。请检查 regions." + arena.region()
+                    + " 与 max-y 设置");
         }
     }
 

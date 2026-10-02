@@ -1,6 +1,7 @@
 package cn.mgtown.fmwar.game;
 
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.util.Vector;
@@ -25,35 +26,55 @@ public final class SafeLocation {
 
     /** 在给定 x/z 上寻找最高可落脚点；失败返回 null。 */
     public static Location find(World world, double x, double z) {
-        return find(world, x, z, 0.0);
+        return find(world, x, z, 0.0, 0.0, false);
     }
 
     /**
      * 在给定 x/z 上寻找最高可落脚点；失败返回 null。
      *
-     * <p>无论是否给了参考高度，落点都取该 x/z 上**最高的可落脚面**——也就是
-     * “最高方块的上表面”，绝不会落到房子内部。参考高度只用来跳过无意义的搜索区间
-     * （起点不会高于世界最高点），因此它不改变最终结果。</p>
+     * <p>落点取该 x/z 上**最高的可落脚面**（最高方块的上表面），不会落到房子内部。
+     * 参考高度只用来抬高搜索起点上限，不改变这个语义。</p>
      */
     public static Location find(World world, double x, double z, double referenceY) {
+        return find(world, x, z, referenceY, 0.0, false);
+    }
+
+    /**
+     * 在给定 x/z 上寻找最高可落脚点；失败返回 null。
+     *
+     * @param referenceY 参考高度；只用于抬高搜索起点上限
+     * @param maxY       落点高度**上限**（&gt; 0 时生效）。室内场地的封顶玻璃会挡住
+     *                   “最高可落脚面”，把落点顶到屋顶（玻璃）上；给出上限即可让落点
+     *                   回到场地内部
+     * @param allowWater 是否允许落在水面上（水面不可站立，落点取水面那一格的上方）
+     */
+    public static Location find(World world, double x, double z, double referenceY,
+                                double maxY, boolean allowWater) {
         if (world == null) {
             return null;
         }
         int blockX = (int) Math.floor(x);
         int blockZ = (int) Math.floor(z);
-        // 起点一律取世界最高点：需求要求“最高可落脚点”，若从配置的 y 往下找，
-        // 而该 y 低于房顶，就会落到房子内部——这正是曾经的错误。
+        // 起点取世界最高点（需求要求“最高可落脚点”）；给了高度上限就压到上限处，
+        // 这样高于上限的封顶玻璃不会被选中
         int startY = Math.min(world.getMaxHeight() - 2, world.getHighestBlockYAt(blockX, blockZ) + 1);
         if (referenceY > 0) {
-            // 参考高度只用于“抬高起点上限”的语义保留（例如场地整体高于世界最高点时）
             startY = Math.min(world.getMaxHeight() - 2, Math.max(startY, (int) Math.floor(referenceY)));
+        }
+        if (maxY > 0) {
+            startY = Math.min(startY, (int) Math.floor(maxY));
         }
         for (int y = startY; y > world.getMinHeight(); y--) {
             Block ground = world.getBlockAt(blockX, y, blockZ);
-            if (ground.isLiquid() || ground.isEmpty()) {
+            if (ground.isEmpty()) {
                 continue;
             }
-            if (!ground.getType().isSolid()) {
+            if (ground.isLiquid()) {
+                // 水面：只有显式允许时才作为落点
+                if (!allowWater || !isWater(ground)) {
+                    continue;
+                }
+            } else if (!ground.getType().isSolid()) {
                 continue;
             }
             if (!ground.getRelative(0, 1, 0).isPassable() || !ground.getRelative(0, 2, 0).isPassable()) {
@@ -62,6 +83,73 @@ public final class SafeLocation {
             Location location = new Location(world, blockX + 0.5, y + 1.0, blockZ + 0.5);
             location.setDirection(new Vector(0, 0, 0));
             return location;
+        }
+        return null;
+    }
+
+    /** 是否水（不含岩浆）。 */
+    private static boolean isWater(Block block) {
+        Material type = block.getType();
+        return type == Material.WATER
+                || type == Material.BUBBLE_COLUMN
+                || type == Material.KELP
+                || type == Material.KELP_PLANT
+                || type == Material.SEAGRASS
+                || type == Material.TALL_SEAGRASS;
+    }
+
+    /**
+     * 在给定**区域**的整个水平范围内采样落脚点；找不到返回 null。
+     *
+     * <p>决斗圈用这个方法而不是 {@link #sampleSquare}：决斗圈的区域通常是长方形
+     * （例如 x 跨度 17 格、z 跨度 35 格），用“中心 ± 半径”的正方形采样会留下大量
+     * 覆盖不到的死角，半径写大了还会越出区域。直接按区域范围取点，
+     * 既铺满整个圈，也天然保证不越界。</p>
+     *
+     * @param region     落点必须落在其中
+     * @param maxY       落点高度上限（&gt; 0 生效）
+     * @param allowWater 是否允许落在水面上
+     */
+    public static Location sampleRegion(World world, cn.mgtown.fmwar.config.Region region,
+                                        double minSpacing, int maxAttempts,
+                                        java.util.List<Location> taken,
+                                        double referenceY, double maxY, boolean allowWater) {
+        if (world == null || region == null) {
+            return null;
+        }
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        // 区域内取点要含边界：+1 让 maxX/maxZ 那一格也能被抽到
+        double widthX = Math.max(1.0, region.maxX() - region.minX() + 1);
+        double widthZ = Math.max(1.0, region.maxZ() - region.minZ() + 1);
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            double x = region.minX() + random.nextDouble(widthX);
+            double z = region.minZ() + random.nextDouble(widthZ);
+            if (!region.containsXZ(world.getName(), x, z)) {
+                continue;
+            }
+            Location candidate = find(world, x, z, referenceY, maxY, allowWater);
+            if (candidate == null) {
+                continue;
+            }
+            // 地形落差可能让实际落脚点偏出区域，落地后再确认一次（含高度范围）
+            if (!region.contains(candidate)) {
+                continue;
+            }
+            boolean tooClose = false;
+            for (Location other : taken) {
+                if (other.getWorld() != candidate.getWorld()) {
+                    continue;
+                }
+                double dx = other.getX() - candidate.getX();
+                double dz = other.getZ() - candidate.getZ();
+                if (Math.sqrt(dx * dx + dz * dz) < minSpacing) {
+                    tooClose = true;
+                    break;
+                }
+            }
+            if (!tooClose) {
+                return candidate;
+            }
         }
         return null;
     }
@@ -80,6 +168,20 @@ public final class SafeLocation {
                                         double halfSize, double minSpacing, int maxAttempts,
                                         java.util.List<Location> taken, cn.mgtown.fmwar.config.Region within,
                                         double referenceY) {
+        return sampleSquare(world, centerX, centerZ, halfSize, minSpacing, maxAttempts,
+                taken, within, referenceY, 0.0, false);
+    }
+
+    /**
+     * 正方形采样的完整版本。
+     *
+     * @param maxY       落点高度上限（&gt; 0 生效）：室内场地用它避开封顶玻璃
+     * @param allowWater 是否允许落在水面上
+     */
+    public static Location sampleSquare(World world, double centerX, double centerZ,
+                                        double halfSize, double minSpacing, int maxAttempts,
+                                        java.util.List<Location> taken, cn.mgtown.fmwar.config.Region within,
+                                        double referenceY, double maxY, boolean allowWater) {
         ThreadLocalRandom random = ThreadLocalRandom.current();
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             double x = centerX + random.nextDouble(-halfSize, halfSize);
@@ -89,13 +191,14 @@ public final class SafeLocation {
             if (within != null && !within.containsXZ(world.getName(), x, z)) {
                 continue;
             }
-            Location candidate = find(world, x, z, referenceY);
+            Location candidate = find(world, x, z, referenceY, maxY, allowWater);
             if (candidate == null) {
                 continue;
             }
-            // 地形落差可能让实际落脚点偏出场地边界，落地后再确认一次
-            if (within != null
-                    && !within.containsXZ(world.getName(), candidate.getX(), candidate.getZ())) {
+            // 地形落差可能让实际落脚点偏出场地边界，落地后再确认一次。
+            // 这里必须用带 y 的 contains：高度上限已经保证落点在场地内部，
+            // 而 duel-2 这类场地的 y 范围是有意义的（低于上限）
+            if (within != null && !within.contains(candidate)) {
                 continue;
             }
             boolean tooClose = false;

@@ -103,12 +103,41 @@ public record Settings(
     }
 
     /**
+     * 单个决斗圈的参数。
+     *
+     * <p>落点范围**由 region 决定**，不再使用“中心 ± 半径”的正方形——决斗圈区域多为
+     * 长方形，正方形采样会留下死角且容易越界。center 仅用于兜底落点与搜索参考高度。</p>
+     *
+     * @param region     落点约束区域（{@code regions} 里的键）
+     * @param maxY       落点高度上限（&gt; 0 生效）。室内场地的封顶玻璃会挡住
+     *                   “最高可落脚面”，必须给上限才能把落点压回场地内部
+     * @param allowWater 是否允许落在水面上
+     */
+    public record DuelArena(String region, double centerX, double centerY, double centerZ,
+                            double minSpacing, int maxAttempts,
+                            double maxY, boolean allowWater) {
+    }
+
+    /**
      * 决斗圈。
      *
-     * @param centerY 中心 Y；仅作参考高度，可省略
+     * <p>可以有多个：到点后**随机选一个**，本局所有存活玩家都传送到同一个圈里。</p>
+     *
+     * @param arenas 全部候选决斗圈，至少一个
+     * @param random 是否随机选择（false 时固定用第一个）
      */
-    public record Duel(double centerX, double centerY, double centerZ,
-                       double radius, double minSpacing, int maxAttempts) {
+    public record Duel(List<DuelArena> arenas, boolean random) {
+
+        /** 随机（或固定）选出本次使用的决斗圈。 */
+        public DuelArena pick(java.util.Random generator) {
+            if (arenas.isEmpty()) {
+                return null;
+            }
+            if (!random || arenas.size() == 1) {
+                return arenas.get(0);
+            }
+            return arenas.get(generator.nextInt(arenas.size()));
+        }
     }
 
     /**

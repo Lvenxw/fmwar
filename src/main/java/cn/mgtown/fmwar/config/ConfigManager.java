@@ -22,9 +22,9 @@ import java.util.Map;
  */
 public final class ConfigManager {
 
-    /** 需求文档里的六个按钮/区域键，缺失即视为配置错误。 */
+    /** 需求文档里的按钮/区域键，缺失即视为配置错误。 */
     private static final List<String> REQUIRED_REGIONS =
-            List.of("arena", "notify", "prep-room", "hall", "duel-1");
+            List.of("arena", "notify", "prep-room", "hall", "duel-1", "duel-2");
     private static final List<String> REQUIRED_LOCATIONS =
             List.of("arena-spawn", "prep-spawn", "hall-spawn");
     private static final List<String> REQUIRED_BUTTONS =
@@ -43,6 +43,7 @@ public final class ConfigManager {
             "regions.prep-room.min", "regions.prep-room.max",
             "regions.hall.min", "regions.hall.max",
             "regions.duel-1.min", "regions.duel-1.max",
+            "regions.duel-2.min", "regions.duel-2.max",
             "locations.arena-spawn.point", "locations.prep-spawn.point", "locations.hall-spawn.point",
             "timing.game-duration", "timing.prepare-clicks",
             "chests.locations", "chests.loot-groups",
@@ -166,12 +167,7 @@ public final class ConfigManager {
                 yaml.getDouble("disperse.min-spacing", 25.0),
                 (int) yaml.getLong("disperse.max-attempts", 600));
 
-        double[] duelCenter = parseCenter(yaml, "duel.center", defaultWorld);
-        Settings.Duel duel = new Settings.Duel(
-                duelCenter[0], duelCenter[1], duelCenter[2],
-                yaml.getDouble("duel.radius", 40.0),
-                yaml.getDouble("duel.min-spacing", 5.0),
-                (int) yaml.getLong("duel.max-attempts", 300));
+        Settings.Duel duel = parseDuel(yaml, defaultWorld);
 
         Settings.Start start = new Settings.Start(
                 yaml.getBoolean("start.clear-inventory", true),
@@ -504,11 +500,27 @@ public final class ConfigManager {
                                 + " —— 玩家会落在场地外并被立刻判为离开游戏"));
             }
             Settings.Duel duel = parsed.duel();
-            if (!arenaRegion.containsCircleXZ(duel.centerX(), duel.centerZ(), duel.radius())) {
-                problems.add(new Spec.Problem("duel",
-                        "决斗圈越出 regions.arena（中心 " + fmt(duel.centerX()) + "," + fmt(duel.centerZ())
-                                + " 半径 " + fmt(duel.radius()) + " 超出场地边界）"
-                                + " —— 传送过去的玩家会被立刻判为离开游戏"));
+            for (Settings.DuelArena arena : duel.arenas()) {
+                // 决斗圈的区域（duel-1 / duel-2）必须**完全落在场地内**：
+                // 只要有一角伸出场地，被传到那里的玩家会立刻被判“离开游戏”。
+                // 判定用区域本身而不是“中心+半径”，因为每个圈的范围就是它自己的区域。
+                Region duelRegion = regions.get(arena.region());
+                if (duelRegion == null) {
+                    problems.add(new Spec.Problem("duel.arenas",
+                            "决斗圈引用了不存在的区域 regions." + arena.region()
+                                    + " —— 该决斗圈不会生效"));
+                    continue;
+                }
+                if (!arenaRegion.covers(duelRegion)) {
+                    problems.add(new Spec.Problem("regions." + arena.region(),
+                            "未完全落在 regions.arena 之内"
+                                    + " —— 被传到界外的玩家会被立刻判为离开游戏"));
+                }
+                if (arena.maxY() > 0 && arena.maxY() < duelRegion.minY()) {
+                    problems.add(new Spec.Problem("duel.arenas[].max-y",
+                            "高度上限 " + fmt(arena.maxY()) + " 低于区域 regions." + arena.region()
+                                    + " 的最低高度 " + fmt(duelRegion.minY()) + " —— 永远找不到落点"));
+                }
             }
         }
         for (String key : REQUIRED_LOCATIONS) {
@@ -623,6 +635,74 @@ public final class ConfigManager {
      *
      * @return 长度 3 的数组 {@code [x, y, z]}；无法解析时返回 {@code {0,0,0}} 并记录警告
      */
+    /**
+     * 解析决斗圈配置。
+     *
+     * <p>支持两种写法：</p>
+     * <ul>
+     *   <li>新版 {@code duel.arenas} 列表——每个圈可独立指定区域、高度上限与是否允许落在水上；</li>
+     *   <li>旧版 {@code duel.center / radius / min-spacing / max-attempts}——自动视为唯一的
+     *       决斗圈（区域取 {@code duel-1}），保证老配置继续可用。</li>
+     * </ul>
+     */
+    private Settings.Duel parseDuel(FileConfiguration yaml, String defaultWorld) {
+        boolean random = yaml.getBoolean("duel.random", true);
+        List<Settings.DuelArena> arenas = new ArrayList<>();
+        List<Map<?, ?>> rawArenas = yaml.getMapList("duel.arenas");
+        for (Map<?, ?> raw : rawArenas) {
+            String region = raw.get("region") == null ? "duel-1" : String.valueOf(raw.get("region"));
+            Object centerRaw = raw.get("center");
+            double[] center = centerRaw instanceof List<?> list
+                    ? parseCenterValue(list, "duel.arenas[].center")
+                    : new double[]{0.0, 0.0, 0.0};
+            arenas.add(new Settings.DuelArena(
+                    region,
+                    center[0], center[1], center[2],
+                    toDoubleOrDefault(raw.get("min-spacing"), 5.0),
+                    (int) toDoubleOrDefault(raw.get("max-attempts"), 300.0),
+                    toDoubleOrDefault(raw.get("max-y"), 0.0),
+                    Boolean.TRUE.equals(raw.get("allow-water"))));
+        }
+        if (arenas.isEmpty()) {
+            // 旧版写法：单个决斗圈
+            double[] center = parseCenter(yaml, "duel.center", defaultWorld);
+            arenas.add(new Settings.DuelArena(
+                    "duel-1",
+                    center[0], center[1], center[2],
+                    yaml.getDouble("duel.min-spacing", 5.0),
+                    (int) yaml.getLong("duel.max-attempts", 300),
+                    yaml.getDouble("duel.max-y", 0.0),
+                    yaml.getBoolean("duel.allow-water", false)));
+        }
+        return new Settings.Duel(List.copyOf(arenas), random);
+    }
+
+    /** 解析 {@code [x, y, z]} / {@code [x, z]}；失败返回 0,0,0 并告警。 */
+    private double[] parseCenterValue(List<?> list, String path) {
+        if (list.size() == 3) {
+            Double x = toDouble(list.get(0));
+            Double y = toDouble(list.get(1));
+            Double z = toDouble(list.get(2));
+            if (x != null && y != null && z != null) {
+                return new double[]{x, y, z};
+            }
+        } else if (list.size() == 2) {
+            Double x = toDouble(list.get(0));
+            Double z = toDouble(list.get(1));
+            if (x != null && z != null) {
+                return new double[]{x, 0.0, z};
+            }
+        }
+        plugin.getLogger().warning("[config] " + path + " 格式应为 [x, y, z]（或简写 [x, z]），"
+                + "当前为 " + list);
+        return new double[]{0.0, 0.0, 0.0};
+    }
+
+    private double toDoubleOrDefault(Object raw, double fallback) {
+        Double value = toDouble(raw);
+        return value == null ? fallback : value;
+    }
+
     private double[] parseCenter(FileConfiguration yaml, String path, String defaultWorld) {
         Object raw = yaml.get(path);
         if (raw instanceof List<?> list) {
