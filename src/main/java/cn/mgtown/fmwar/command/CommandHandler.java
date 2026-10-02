@@ -13,6 +13,7 @@ import cn.mgtown.fmwar.util.TimeUtil;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -189,9 +190,8 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         var meta = item.getItemMeta();
         Component name = (meta != null && meta.hasDisplayName())
                 ? meta.displayName()
-                : Component.translatable(item.getType().translationKey())
-                  .decoration(TextDecoration.ITALIC, false);
-        return MiniMessage.miniMessage().serialize(name);
+                : Component.translatable(item.getType().translationKey());
+        return PlainTextComponentSerializer.plainText().serialize(name);
     }
 
     /** {@code /fmwar debug} —— 切换准备/队列链路的详细日志（排查按钮与倒计时问题）。 */
