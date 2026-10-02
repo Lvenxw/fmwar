@@ -273,6 +273,7 @@ messages:
   actionbar: true
   queue-join: '{prefix}&a{player} &7加入游戏队列'
   queue-leave: '{prefix}&c{player} &7退出游戏队列'
+  queue-teleport-failed: "<red>传送被拦截（领地权限不足），已退出队列。</red>"
   queue-joined-self: '{prefix}&a你已加入游戏队列，请在准备房间内等待'
   queue-left-self: '{prefix}&7你已退出游戏队列'
   queue-already-joined: '{prefix}&7你已经在游戏队列中，无需重复点击'

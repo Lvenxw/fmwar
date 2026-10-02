@@ -34,6 +34,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 
 import cn.mgtown.fmwar.config.Position;
@@ -650,16 +651,15 @@ public final class GameEngine {
         if (phase == GamePhase.PREPARING) {
             cancelCountdown("prepare-cancel-joined");
         } else if (phase != GamePhase.IDLE) {
-            // 对局中与结算中确实不该再接收新玩家
             alerts.sendTo(player, "game-already-running", Map.of());
             return false;
         }
-        if (queue.contains(player.getUniqueId())) {
-            // 以前这里静默返回，玩家只会觉得“按钮没反应”
+        UUID uuid = player.getUniqueId();
+        if (queue.contains(uuid)) {
             alerts.sendTo(player, "queue-already-joined", Map.of());
             return false;
         }
-        queue.add(player.getUniqueId());
+        queue.add(uuid);
         // 需求：准备房间的领地常态关闭传送权限。传送本身走 teleport()，
         // 它会在传送期间临时放行、传送完成立刻恢复，因此这里不需要常驻打开权限。
         teleport(player, config.settings().location("prep-spawn"));
@@ -668,6 +668,28 @@ public final class GameEngine {
         alerts.sendTo(player, "queue-joined-self", Map.of());
         alerts.broadcast("queue-join", Map.of("player", player.getName()));
         debug("玩家 " + player.getName() + " 加入队列，当前队列 " + queue.size() + " 人");
+
+        // 传送是异步的：领地插件若拦下这次传送，future 会以 false 完成。
+        // 届时必须把刚刚入队的玩家摘掉，否则会出现“人在大厅、队列里却有人”的幽灵状态，
+        // 准备房间人数判定会被它拉到 2 人从而启动倒计时。
+        teleportAsyncWithResult(player, config.settings().location("prep-spawn").toLocation())
+                .whenComplete((ok, error) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (error == null && Boolean.TRUE.equals(ok)) {
+                        return;
+                    }
+                    // 玩家可能在等待期间自己又退了队/下线，只有仍在队列中才回滚
+                    if (!queue.remove(uuid)) {
+                        return;
+                    }
+                    scoreboard.detach(player);
+                    Player online = Bukkit.getPlayer(uuid);
+                    String name = online == null ? player.getName() : online.getName();
+                    debug("玩家 " + name + " 入队传送失败（被领地/插件拦截或取消），已从队列移除");
+                    if (online != null) {
+                        alerts.sendTo(online, "queue-teleport-failed", Map.of());
+                    }
+                    alerts.broadcast("queue-leave", Map.of("player", name));
+                }));
         return true;
     }
 
@@ -1712,6 +1734,35 @@ public final class GameEngine {
             return;
         }
         teleport(player, target.toLocation());
+    }
+
+    /**
+     * 与 {@link #teleport(Player, Location)} 相同，但把传送成败回传给调用方。
+     *
+     * <p>领地插件通常在 PlayerTeleportEvent 里取消事件来拦人，这种情况下
+     * {@link Player#teleportAsync(Location)} 的 future 会完成为 {@code false}；
+     * 调用方据此决定是否需要回滚副作用（例如把刚入队的玩家踢出队列）。</p>
+     */
+    public CompletableFuture<Boolean> teleportAsyncWithResult(Player player, Location location) {
+        if (location == null) {
+            plugin.getLogger().warning("传送目标世界未加载，玩家 " + player.getName() + " 未被传送");
+            return CompletableFuture.completedFuture(false);
+        }
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        residence.runWithAccess(() -> {
+            try {
+                player.teleportAsync(location).whenComplete((ok, error) -> {
+                    if (error != null) {
+                        result.completeExceptionally(error);
+                    } else {
+                        result.complete(Boolean.TRUE.equals(ok));
+                    }
+                });
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        });
+        return result;
     }
 
     /**
