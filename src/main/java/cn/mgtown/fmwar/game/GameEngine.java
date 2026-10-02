@@ -977,19 +977,25 @@ public final class GameEngine {
                     + " 未配置，决斗圈传送已跳过（玩家保持在原地）");
             return;
         }
+        // 落点模式由“区域 + 配置”共同决定：区域 y 范围窄时一律锁定高度（以区域为准），
+        // 避免从别的圈抄下来的 max-y 把落点顶到区域之外
+        boolean exactY = Settings.resolveExactY(duelRegion, arena.exactY());
+        double effectiveMaxY = Settings.resolveMaxY(duelRegion, exactY, arena.maxY());
         debug("本局决斗圈：" + arena.region() + "（落点区域 x [" + (long) duelRegion.minX()
-                + "," + (long) duelRegion.maxX() + "] z [" + (long) duelRegion.minZ()
+                + "," + (long) duelRegion.maxX() + "] y [" + (long) duelRegion.minY()
+                + "," + (long) duelRegion.maxY() + "] z [" + (long) duelRegion.minZ()
                 + "," + (long) duelRegion.maxZ() + "]，"
-                + (arena.exactY()
+                + (exactY
                         ? "高度锁定 y=" + (long) arena.centerY() + "（不搜索地形）"
-                        : "高度上限 " + (long) arena.maxY() + "，允许水面 " + arena.allowWater())
+                        : "搜索最高可落脚面，上限 " + (long) effectiveMaxY
+                                + "，允许水面 " + arena.allowWater())
                 + "）");
 
         // 兜底落点：两种模式各自取自己的“中心点安全位”
-        Location fallback = arena.exactY()
+        Location fallback = exactY
                 ? SafeLocation.exact(target, arena.centerX(), arena.centerY(), arena.centerZ())
                 : SafeLocation.find(target, arena.centerX(), arena.centerZ(),
-                        arena.centerY(), arena.maxY(), arena.allowWater());
+                        arena.centerY(), effectiveMaxY, arena.allowWater());
         if (fallback == null) {
             fallback = new Location(target, arena.centerX() + 0.5,
                     Math.max(duelRegion.minY() + 1, arena.centerY()), arena.centerZ() + 0.5);
@@ -1000,13 +1006,13 @@ public final class GameEngine {
         for (Player player : onlineMembers()) {
             // 在**该区域的整个范围**内取点，而不是“中心 ± 半径”的正方形：
             // 决斗圈区域多为长方形，正方形采样会有死角且容易越界。
-            // exactY 模式下完全不看地形，直接把高度钉在配置值上。
-            Location sample = arena.exactY()
+            // 锁定高度模式下完全不看地形，直接把高度钉在配置值上。
+            Location sample = exactY
                     ? SafeLocation.sampleRegionExactY(target, duelRegion, arena.centerY(),
                             arena.minSpacing(), arena.maxAttempts(), taken)
                     : SafeLocation.sampleRegion(target, duelRegion,
                             arena.minSpacing(), arena.maxAttempts(), taken,
-                            arena.centerY(), arena.maxY(), arena.allowWater());
+                            arena.centerY(), effectiveMaxY, arena.allowWater());
             if (sample == null) {
                 fallbackCount++;
                 teleport(player, fallback);
@@ -1021,7 +1027,7 @@ public final class GameEngine {
             plugin.getLogger().warning("决斗圈：" + fallbackCount + " 名玩家未能采样到落点，"
                     + "已使用兜底点（" + fallback.getBlockX() + "," + fallback.getBlockY() + ","
                     + fallback.getBlockZ() + "）。请检查 regions." + arena.region()
-                    + (arena.exactY() ? " 与 center 的 y" : " 与 max-y"));
+                    + (exactY ? " 与 center 的 y" : " 与 max-y"));
         }
     }
 

@@ -128,6 +128,43 @@ public record Settings(
     }
 
     /**
+     * 解析实际的落点模式。
+     *
+     * <p><b>区域的 y 范围窄（≤ 3 格）时一律锁定高度，以区域为准。</b>
+     * 这是给“水面上一格”这类场地的硬保障：窄 y 范围本身就说明服主把高度量准了，
+     * 此时配置里的 max-y（例如从上一个圈抄下来忘了删）绝不能把落点顶到区域之外。</p>
+     *
+     * @param region       该圈对应的区域
+     * @param explicitExact 配置里是否显式写了 exact-y: true
+     * @return true 表示锁定高度（用 center 的 y），false 表示搜索最高可落脚面
+     */
+    public static boolean resolveExactY(Region region, boolean explicitExact) {
+        if (explicitExact) {
+            return true;
+        }
+        return region != null && (region.maxY() - region.minY()) <= LOCKED_Y_RANGE;
+    }
+
+    /** y 范围不超过这个值就视为“高度已锁定”的场地。 */
+    public static final double LOCKED_Y_RANGE = 3.0;
+
+    /**
+     * 搜索模式下的高度上限。
+     *
+     * <p>锁定高度的场合返回 0（不需要上限）；其余情况取 max-y。若 max-y 高于区域最高点，
+     * 会被压到区域最高点——否则落点会跑到区域上方。</p>
+     */
+    public static double resolveMaxY(Region region, boolean exactY, double configuredMaxY) {
+        if (exactY || region == null) {
+            return configuredMaxY;
+        }
+        if (configuredMaxY <= 0) {
+            return 0.0;
+        }
+        return Math.min(configuredMaxY, region.maxY());
+    }
+
+    /**
      * 决斗圈。
      *
      * <p>可以有多个：到点后**随机选一个**，本局所有存活玩家都传送到同一个圈里。</p>

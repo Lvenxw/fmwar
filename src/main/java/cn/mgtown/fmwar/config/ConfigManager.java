@@ -516,23 +516,28 @@ public final class ConfigManager {
                             "未完全落在 regions.arena 之内"
                                     + " —— 被传到界外的玩家会被立刻判为离开游戏"));
                 }
-                if (arena.exactY()) {
+                // 用解析后的实际模式校验：区域 y 范围窄时一律锁定高度
+                boolean exactY = Settings.resolveExactY(duelRegion, arena.exactY());
+                if (exactY) {
                     // 锁定高度模式：center 的 y 必须落在区域 y 范围内，否则永远采不到点
                     if (arena.centerY() < duelRegion.minY() || arena.centerY() > duelRegion.maxY()) {
                         problems.add(new Spec.Problem("duel.arenas[].center",
-                                "exact-y 模式下锁定高度 " + fmt(arena.centerY())
+                                "锁定高度模式下高度 " + fmt(arena.centerY())
                                         + " 不在 regions." + arena.region() + " 的 y 范围 ["
                                         + fmt(duelRegion.minY()) + ", " + fmt(duelRegion.maxY())
                                         + "] 内 —— 永远找不到落点"));
                     }
-                } else if (arena.maxY() <= 0) {
-                    problems.add(new Spec.Problem("duel.arenas[].max-y",
-                            "未设置高度上限 —— 室内场地的封顶玻璃会被当成“最高可落脚面”，"
-                                    + "玩家会站到屋顶上。请给出 max-y，或改用 exact-y"));
-                } else if (arena.maxY() < duelRegion.minY()) {
-                    problems.add(new Spec.Problem("duel.arenas[].max-y",
-                            "高度上限 " + fmt(arena.maxY()) + " 低于区域 regions." + arena.region()
-                                    + " 的最低高度 " + fmt(duelRegion.minY()) + " —— 永远找不到落点"));
+                } else {
+                    double maxY = Settings.resolveMaxY(duelRegion, false, arena.maxY());
+                    if (maxY <= 0) {
+                        problems.add(new Spec.Problem("duel.arenas[].max-y",
+                                "未设置高度上限 —— 室内场地的封顶玻璃会被当成“最高可落脚面”，"
+                                        + "玩家会站到屋顶上。请给出 max-y，或改用 exact-y"));
+                    } else if (maxY < duelRegion.minY()) {
+                        problems.add(new Spec.Problem("duel.arenas[].max-y",
+                                "高度上限 " + fmt(maxY) + " 低于区域 regions." + arena.region()
+                                        + " 的最低高度 " + fmt(duelRegion.minY()) + " —— 永远找不到落点"));
+                    }
                 }
             }
         }

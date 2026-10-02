@@ -149,5 +149,34 @@ public final class FMWar extends JavaPlugin {
         } else {
             getLogger().info("游戏世界 " + configured + " 已就绪（当前 " + players + " 名玩家）");
         }
+        reportDuelReadiness();
+    }
+
+    /**
+     * 报告每个决斗圈的**实际落点模式**。
+     *
+     * <p>落点模式由“区域 y 范围 + 配置”共同决定：区域 y 范围窄（≤3 格）时一律锁定高度。
+     * 这层推断容易让人误以为“改了配置就生效”，所以启动时直接把结论打出来，
+     * 避免再出现“落点跑到决斗圈上方”这种只能靠试的现象。</p>
+     */
+    private void reportDuelReadiness() {
+        var settings = configManager.settings();
+        for (var arena : settings.duel().arenas()) {
+            var region = settings.optionalRegion(arena.region());
+            if (region == null) {
+                getLogger().warning("决斗圈 " + arena.region() + " 引用的区域不存在，该圈不会生效");
+                continue;
+            }
+            boolean exact = cn.mgtown.fmwar.config.Settings.resolveExactY(region, arena.exactY());
+            double maxY = cn.mgtown.fmwar.config.Settings.resolveMaxY(region, exact, arena.maxY());
+            getLogger().info("决斗圈 " + arena.region() + "："
+                    + (exact
+                            ? "落点高度锁定为 y=" + (long) arena.centerY() + "（区域 y 范围窄，不搜索地形）"
+                            : "搜索最高可落脚面，高度上限 " + (long) maxY
+                                    + "，允许水面 " + arena.allowWater())
+                    + "；区域 y [" + (long) region.minY() + ", " + (long) region.maxY() + "]"
+                    + (exact && !arena.exactY()
+                            ? "（由区域推断，配置里未写 exact-y）" : ""));
+        }
     }
 }
