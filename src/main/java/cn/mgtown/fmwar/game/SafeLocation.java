@@ -87,6 +87,25 @@ public final class SafeLocation {
         return null;
     }
 
+    /**
+     * 在给定 x/z 上取**精确高度**的落点（不做任何地形搜索）。
+     *
+     * <p>用于规则不规则、且服主已经把高度量准的场地：直接按配置的 y 放置，
+     * 完全不看该列的地形。适用场景是“水面上方一格”这类无法靠“最高可落脚面”
+     * 描述的位置——水面不是可站立方块，而悬挂的藤蔓/垂叶又会被误判为落脚面。</p>
+     *
+     * @param y 落点的脚部高度（即玩家站在 y 这一格）
+     */
+    public static Location exact(World world, double x, double y, double z) {
+        if (world == null) {
+            return null;
+        }
+        Location location = new Location(world,
+                Math.floor(x) + 0.5, y, Math.floor(z) + 0.5);
+        location.setDirection(new Vector(0, 0, 0));
+        return location;
+    }
+
     /** 是否水（不含岩浆）。 */
     private static boolean isWater(Block block) {
         Material type = block.getType();
@@ -135,23 +154,62 @@ public final class SafeLocation {
             if (!region.contains(candidate)) {
                 continue;
             }
-            boolean tooClose = false;
-            for (Location other : taken) {
-                if (other.getWorld() != candidate.getWorld()) {
-                    continue;
-                }
-                double dx = other.getX() - candidate.getX();
-                double dz = other.getZ() - candidate.getZ();
-                if (Math.sqrt(dx * dx + dz * dz) < minSpacing) {
-                    tooClose = true;
-                    break;
-                }
+            if (isTooClose(candidate, taken, minSpacing)) {
+                continue;
             }
-            if (!tooClose) {
-                return candidate;
-            }
+            return candidate;
         }
         return null;
+    }
+
+    /**
+     * 在给定**区域**的整个水平范围内采样，落点高度**锁定为 {@code exactY}**。
+     *
+     * <p>不做任何地形搜索。区域只要 x/z 在范围内、且 {@code exactY} 落在区域的
+     * y 范围里即可——这正好适配“不规则水域 + 只认准水面上一格”的场地。</p>
+     *
+     * @param exactY 落点脚部高度（配置的 center y）
+     */
+    public static Location sampleRegionExactY(World world, cn.mgtown.fmwar.config.Region region,
+                                              double exactY, double minSpacing, int maxAttempts,
+                                              java.util.List<Location> taken) {
+        if (world == null || region == null) {
+            return null;
+        }
+        double widthX = Math.max(1.0, region.maxX() - region.minX() + 1);
+        double widthZ = Math.max(1.0, region.maxZ() - region.minZ() + 1);
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            double x = region.minX() + random.nextDouble(widthX);
+            double z = region.minZ() + random.nextDouble(widthZ);
+            if (!region.containsXZ(world.getName(), x, z)) {
+                continue;
+            }
+            Location candidate = exact(world, x, exactY, z);
+            if (!region.contains(candidate)) {
+                continue;
+            }
+            if (isTooClose(candidate, taken, minSpacing)) {
+                continue;
+            }
+            return candidate;
+        }
+        return null;
+    }
+
+    /** 是否与已选落点距离过近。 */
+    private static boolean isTooClose(Location candidate, java.util.List<Location> taken, double minSpacing) {
+        for (Location other : taken) {
+            if (other.getWorld() != candidate.getWorld()) {
+                continue;
+            }
+            double dx = other.getX() - candidate.getX();
+            double dz = other.getZ() - candidate.getZ();
+            if (Math.sqrt(dx * dx + dz * dz) < minSpacing) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

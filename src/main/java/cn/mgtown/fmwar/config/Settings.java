@@ -106,16 +106,25 @@ public record Settings(
      * 单个决斗圈的参数。
      *
      * <p>落点范围**由 region 决定**，不再使用“中心 ± 半径”的正方形——决斗圈区域多为
-     * 长方形，正方形采样会留下死角且容易越界。center 仅用于兜底落点与搜索参考高度。</p>
+     * 长方形，正方形采样会留下死角且容易越界。</p>
+     *
+     * <p><b>两种落点模式互斥且各自独立</b>：</p>
+     * <ul>
+     *   <li>{@code exactY = true}：落点高度**锁定为 center 的 y**，完全不搜索地形。
+     *       适合不规则场地（水域、悬挂藤蔓）——服主把高度量准后直接钉死。</li>
+     *   <li>{@code exactY = false}：按 {@link #maxY} 上限搜索“最高可落脚面”。
+     *       适合室内场地避开封顶玻璃。</li>
+     * </ul>
+     * <p>两种模式的配置项不会互相影响：exactY 为 true 时 maxY、allowWater 都不参与。</p>
      *
      * @param region     落点约束区域（{@code regions} 里的键）
-     * @param maxY       落点高度上限（&gt; 0 生效）。室内场地的封顶玻璃会挡住
-     *                   “最高可落脚面”，必须给上限才能把落点压回场地内部
-     * @param allowWater 是否允许落在水面上
+     * @param exactY     是否把落点高度锁定为 center 的 y
+     * @param maxY       落点高度上限（&gt; 0 生效）；仅在 exactY 为 false 时参与
+     * @param allowWater 是否允许落在水面上；仅在 exactY 为 false 时参与
      */
     public record DuelArena(String region, double centerX, double centerY, double centerZ,
                             double minSpacing, int maxAttempts,
-                            double maxY, boolean allowWater) {
+                            boolean exactY, double maxY, boolean allowWater) {
     }
 
     /**
