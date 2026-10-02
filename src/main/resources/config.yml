@@ -188,7 +188,7 @@ start:
   # 抗性提升（tick）
   resistance:
     enabled: true
-    duration-ticks: 200
+    duration-ticks: 600
     amplifier: 4
   # 回满血量与饱食度
   heal: true
@@ -258,13 +258,11 @@ extra-shops:
 #   - 对局开始 → 打开 arena-regions（开局分散、传决斗圈、观战进场都在这段时间内）
 #   - 对局结束 → 恢复 arena-regions
 #
-# flag 默认用 move：它才是“能不能进出这片领地”的实际生效项
-#（tp 只约束领地自身的 /res tp 指令，对插件传送无效）。
 # 本插件按插件名检测 Residence，未安装时整段自动跳过。
 # ===========================================================================
 residence:
   enabled: true
-  flag: move
+  flag: tp
   # 排队期间需要放行的领地
   prep-regions: [FM.zb]
   # 对局期间需要放行的领地
