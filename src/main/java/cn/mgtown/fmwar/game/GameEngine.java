@@ -955,15 +955,31 @@ public final class GameEngine {
         if (target == null) {
             return;
         }
-        // 决斗圈同样以场地为硬约束：越界落点一样会被判“离开游戏”
-        Region arena = settings.optionalRegion("arena");
+        // 决斗圈的硬约束：必须是配置的 duel-1 区域。
+        Region duelRegion = settings.optionalRegion("duel-1");
+        if (duelRegion == null) {
+            plugin.getLogger().warning("regions.duel-1 未配置，决斗圈传送已跳过（玩家保持在原地）");
+            return;
+        }
+
+        // 采样失败时的兜底落点：决斗圈中心，至少保证在圈内
+        Location duelCenter = new Location(target,
+                duel.centerX() + 0.5, duel.centerY(), duel.centerZ() + 0.5);
+
         List<Location> taken = new ArrayList<>();
         for (Player player : onlineMembers()) {
             // 需求：决斗圈是**以中心为心的正方形**（半边长=半径），不是圆
             Location sample = SafeLocation.sampleSquare(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena, duel.centerY());
+                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, duelRegion, duel.centerY());
+            // 二次校验：sampleSquare 的区域约束严格程度视实现而异，越界点直接丢弃，
+            // 避免“名义上在圈内、实际在圈外”。
+            if (sample != null && !duelRegion.contains(sample)) {
+                sample = null;
+            }
             if (sample == null) {
-                teleport(player, settings.location("arena-spawn"));
+                // 兜底到决斗圈中心，而不是 arena-spawn
+                teleport(player, duelCenter);
+                alerts.sendActionBarTo(player, "duel-teleport", Map.of());
                 continue;
             }
             taken.add(sample);
