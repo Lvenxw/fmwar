@@ -200,7 +200,7 @@ chests:
     - - 'MACE:union=1'
       - 'NETHERITE_HOE:union=1'
     - - 'TRIDENT:daedalus=1,loyalty=3'
-    - - 'SPEAR:faith=1,lunge=5'
+    - - 'NETHERITE_SPEAR:faith=1,lunge=5'
     - - 'CROSSBOW:fusion_strike=1'
     - - 'BOW:eternal=1'
       - 'TIPPED_ARROW:potion=instant_damage;amplifier=1'
@@ -215,6 +215,28 @@ chests:
 extra-shops:
   enabled: true
   ids: [fmcm1, fmcm2, fmcm3, fmcm4, fmcm5, fmcm6]
+
+# ===========================================================================
+# 领地（Residence）权限联动
+#
+# 准备房间与场地的领地在服务器上常态关闭传送权限，普通玩家进不去。
+# 本插件只在**真正需要**时临时打开、用完立刻恢复：
+#   - 有人进入队列 → 打开 prep-regions
+#   - 队列清空（对局开始 / 全部退出）→ 恢复 prep-regions
+#   - 对局开始 → 打开 arena-regions（开局分散、传决斗圈、观战进场都在这段时间内）
+#   - 对局结束 → 恢复 arena-regions
+#
+# flag 默认用 move：它才是“能不能进出这片领地”的实际生效项
+#（tp 只约束领地自身的 /res tp 指令，对插件传送无效）。
+# 本插件按插件名检测 Residence，未安装时整段自动跳过。
+# ===========================================================================
+residence:
+  enabled: true
+  flag: move
+  # 排队期间需要放行的领地
+  prep-regions: [FM.zb]
+  # 对局期间需要放行的领地
+  arena-regions: [FM]
 
 # ===========================================================================
 # 队伍名（Bukkit 计分板队伍）与记分板
@@ -252,6 +274,8 @@ messages:
   queue-left-self: '{prefix}&7你已退出游戏队列'
   queue-already-joined: '{prefix}&7你已经在游戏队列中，无需重复点击'
   spectator-already: '{prefix}&7你已经在观战模式中'
+  # 准备进度也常驻显示在屏幕上方（BossBar），格式 {clicks}/{required}
+  prepare-progress-bar: '{war_prefix}&e准备进度 &f{clicks}&7/&f{required}&e（由队伍成员共同累计）'
   prepare-progress: '{prefix}&e准备中 &f{clicks}&7/&f{required}'
   # 倒计时常驻显示：BossBar（顶部）+ 侧栏兜底（侧栏百分百会渲染）
   prepare-countdown-bar: '{war_prefix}&e游戏将在 &f{seconds} &e秒后开始'
@@ -289,6 +313,10 @@ messages:
   command-usage-button: '&e/{label} button &7- 列出按钮坐标，或进入游戏内校准'
   command-usage-points: '&e/{label} points &7- 查看与管理积分榜（击杀 +1，获胜 +3）'
   command-usage-debug: '&e/{label} debug &7- 开关准备/队列链路的详细日志（排查按钮与倒计时问题）'
+  command-usage-time: '&e/{label} time <秒数> &7- 修改当前对局的剩余时间（测试用）'
+  time-usage: '{war_prefix}&c用法：/fmwar time <秒数>（例如 /fmwar time 60）'
+  time-set: '{war_prefix}&a已把剩余时间修改为 &f{seconds} &a秒'
+  time-no-game: '{war_prefix}&c当前没有进行中的对局，无法修改剩余时间'
   debug-on: '{war_prefix}&a已开启调试日志：准备按钮、队列进出、倒计时都会打印到控制台，再执行一次可关闭'
   debug-off: '{war_prefix}&7已关闭调试日志'
   # ---- 积分榜 ----

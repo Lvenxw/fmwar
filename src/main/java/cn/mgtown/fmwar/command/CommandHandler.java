@@ -37,7 +37,7 @@ import java.util.UUID;
 public final class CommandHandler implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS =
-            List.of("reload", "start", "stop", "status", "doctor", "button", "points", "debug");
+            List.of("reload", "start", "stop", "status", "doctor", "button", "points", "debug", "time");
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -80,6 +80,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "button" -> button(sender, args);
             case "points" -> points(sender, args);
             case "debug" -> debug(sender);
+            case "time" -> time(sender, args);
             default -> usage(sender, label);
         }
         return true;
@@ -112,6 +113,28 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             case "help", "?" -> pointsUsage(sender);
             default -> pointsUsage(sender);
         }
+    }
+
+    /**
+     * {@code /fmwar time <秒数>} —— 修改当前对局的剩余时间（测试用）。
+     *
+     * <p>没有这条指令时，测“剩 60 秒传决斗圈”“倒计时归零扣血”得干等十几分钟。</p>
+     */
+    private void time(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            line(sender, "time-usage", Map.of());
+            return;
+        }
+        Integer seconds = parseInt(args[1]);
+        if (seconds == null || seconds < 0) {
+            line(sender, "time-usage", Map.of());
+            return;
+        }
+        if (!engine.setRemainingSeconds(seconds)) {
+            line(sender, "time-no-game", Map.of());
+            return;
+        }
+        line(sender, "time-set", Map.of("seconds", Integer.toString(seconds)));
     }
 
     /** {@code /fmwar debug} —— 切换准备/队列链路的详细日志（排查按钮与倒计时问题）。 */
@@ -175,9 +198,6 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         points.save();
         line(sender, "points-updated", Map.of(
                 "player", displayName(target), "points", Integer.toString(Math.max(0, value))));
-        if (sender instanceof Player player) {
-            engine.refreshPointsBoard(player, 1);
-        }
     }
 
     private void pointsAdd(CommandSender sender, String[] args) {

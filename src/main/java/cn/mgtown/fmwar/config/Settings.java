@@ -25,6 +25,7 @@ public record Settings(
         boolean extraShopsEnabled,
         Teams teams,
         Scoreboard scoreboard,
+        Residence residence,
         Map<String, String> messages,
         boolean actionbarMessages
 ) {
@@ -136,6 +137,20 @@ public record Settings(
     }
 
     public record Teams(String player, String spectator) {
+    }
+
+    /**
+     * 领地（Residence）临时权限联动。
+     *
+     * <p>准备房间与场地的领地在服务器上常态关闭传送权限，本插件只在需要时临时打开、
+     * 用完立刻恢复。{@code flag} 默认 {@code move}——它才是“能不能进出这片领地”的实际
+     * 生效项（{@code tp} 只约束领地自身的 {@code /res tp} 指令）。</p>
+     *
+     * @param prepRegions  排队期间需要放行的领地（如 FM.zb）
+     * @param arenaRegions 对局期间需要放行的领地（如 FM）
+     */
+    public record Residence(boolean enabled, String flag,
+                            List<String> prepRegions, List<String> arenaRegions) {
     }
 
     public record Scoreboard(boolean enabled,

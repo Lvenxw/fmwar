@@ -101,6 +101,19 @@ public final class LootParser {
 
         Material material = Material.matchMaterial(materialPart.trim().toUpperCase(java.util.Locale.ROOT));
         if (material == null) {
+            // 兜底：按 Bukkit 的 key 再找一次（兼容带命名空间或小写 id 的写法，
+            // 例如 minecraft:netherite_spear / netherite_hoe）
+            String key = materialPart.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!key.contains(":")) {
+                key = "minecraft:" + key;
+            }
+            try {
+                material = Registry.MATERIAL.get(NamespacedKey.fromString(key));
+            } catch (RuntimeException exception) {
+                material = null;
+            }
+        }
+        if (material == null || material.isAir()) {
             warn.accept("物品材质无法识别: " + raw);
             return null;
         }

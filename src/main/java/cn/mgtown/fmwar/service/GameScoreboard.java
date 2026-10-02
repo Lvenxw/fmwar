@@ -26,25 +26,22 @@ import java.util.UUID;
  *       但只在游戏期间显示给游戏内玩家。</li>
  * </ul>
  *
- * <p>有意不复用 {@link TeamService} 的自建计分板来放积分榜：那块计分板只在游戏期间
- * 挂给玩家，非游戏期间不生效，而且这样不会在别人（包括本插件自己）读取主计分板队伍时
- * 用到被顶掉的侧栏目标。</p>
+ * <p>积分榜**不显示在侧栏**：它只在 {@code /fmwar points list} 里查看，因此本类
+ * 不注册 fmjfb 目标，也不会占用玩家的侧栏。</p>
  */
 public final class GameScoreboard {
 
     private static final String OBJECTIVE = "fm";
-    private static final String TIME_ENTRY = "fmwar.time";
-    private static final String ALIVE_ENTRY = "fmwar.alive";
 
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
 
     private final TeamService teams;
 
     /**
-     * 准备倒计时用的常驻显示条。
+     * 准备阶段的常驻显示条（BossBar）。
      *
-     * <p>需求：倒计时提示要“在队伍里能常驻显示”，而不是按一下按钮才闪一下。
-     * 用 BossBar 而不是记分板多一行——这样现有两行（剩余时间/存活人数）不受影响，
+     * <p>两种情况共用这一条：准备进度（{@code 3/7}）与开局倒计时（{@code 10 秒}）。
+     * 用 BossBar 而不是记分板多一行，这样对局中的两行（剩余时间/存活人数）不受影响，
      * 且对参战者与观战者都常驻可见。</p>
      *
      * <p>Adventure 的 {@link BossBar} 本身没有“显示/隐藏”开关：可见性由
@@ -53,13 +50,13 @@ public final class GameScoreboard {
      */
     private final BossBar bossBar = BossBar.bossBar(
             Component.empty(), 1.0f, BossBar.Color.YELLOW, BossBar.Overlay.PROGRESS);
-    /** 当前正在显示倒计时条的玩家。 */
+    /** 当前正在显示准备阶段显示条的玩家。 */
     private final Set<UUID> countdownViewers = new HashSet<>();
-    /** 倒计时条是否处于“应当显示”的状态。 */
+    /** 显示条是否处于“应当显示”的状态。 */
     private boolean countdownActive;
 
     /**
-     * 准备倒计时的**侧栏**兜底显示。
+     * 准备阶段的**侧栏**兜底显示。
      *
      * <p>BossBar 在某些客户端/资源包环境下可能不显示，而“倒计时看不到”是致命的——
      * 玩家会以为按钮没生效。这里同时在队伍侧栏上挂一个纯文本倒计时，
@@ -68,9 +65,6 @@ public final class GameScoreboard {
     private static final String COUNTDOWN_OBJECTIVE = "fmcd";
     private static final String COUNTDOWN_ENTRY = "fmcd.time";
     private Objective countdownObjective;
-
-    /** 上一次渲染的积分榜条目名，用于增量增删（避免残留旧名次）。 */
-    private final List<String> pointEntries = new ArrayList<>();
 
     public GameScoreboard(TeamService teams) {
         this.teams = teams;
@@ -111,9 +105,9 @@ public final class GameScoreboard {
     public void showCountdown(String text, String sidebarTitle, String sidebarLine, double progress) {
         countdownActive = true;
 
-        // 通道 1：BossBar
+        // 通道 1：BossBar（progress < 0 表示这条只用于准备进度，不显示进度条比例）
         bossBar.name(LEGACY.deserialize(nullToEmpty(text)));
-        bossBar.progress((float) Math.max(0.0, Math.min(1.0, progress)));
+        bossBar.progress(progress < 0 ? 1.0f : (float) Math.max(0.0, Math.min(1.0, progress)));
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (countdownViewers.add(player.getUniqueId())) {
                 player.showBossBar(bossBar);
@@ -133,6 +127,22 @@ public final class GameScoreboard {
         Score score = countdownObjective.getScore(COUNTDOWN_ENTRY);
         score.setScore(1);
         score.customName(LEGACY.deserialize(nullToEmpty(sidebarLine)));
+    }
+
+    /**
+     * 只显示准备进度（不动侧栏）。
+     *
+     * <p>准备阶段大多数时间只有进度可看，此时不该让侧栏显示一条无关的倒计时行。</p>
+     */
+    public void showProgress(String text, double progress) {
+        countdownActive = true;
+        bossBar.name(LEGACY.deserialize(nullToEmpty(text)));
+        bossBar.progress((float) Math.max(0.0, Math.min(1.0, progress)));
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (countdownViewers.add(player.getUniqueId())) {
+                player.showBossBar(bossBar);
+            }
+        }
     }
 
     /** 隐藏准备倒计时（BossBar 与侧栏都收起，并恢复游戏侧栏）。 */
@@ -208,85 +218,6 @@ public final class GameScoreboard {
         Score score = objective.getScore(label);
         score.setScore(value);
         score.customName(LEGACY.deserialize(label));
-    }
-
-    /**
-     * 刷新附魔战争积分榜（记分板 {@code scoreboard.points-main}，默认 {@code fmjfb}）。
-     *
-     * @param ranking 已按名次排好的条目
-     */
-    public void updatePoints(Settings settings, List<PointsService.Entry> ranking) {
-        updatePoints(settings, ranking, 1);
-    }
-
-    /** 注销积分榜目标（插件停用时调用，避免在主计分板上留下空目标）。 */
-    public void detachPoints(String objectiveName) {
-        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
-        for (String entry : pointEntries) {
-            board.resetScores(entry);
-        }
-        pointEntries.clear();
-        Objective objective = board.getObjective(objectiveName);
-        if (objective != null) {
-            objective.unregister();
-        }
-    }
-
-    private void setLine(Objective objective, String entry, Component text) {
-        Score score = objective.getScore(entry);
-        score.setScore(1);
-        score.customName(text);
-    }
-
-    /**
-     * 用分页渲染积分榜。
-     *
-     * @param page 1 起算的页码
-     */
-    public void updatePoints(Settings settings, List<PointsService.Entry> ranking, int page) {
-        Settings.Scoreboard config = settings.scoreboard();
-        if (!config.pointsEnabled()) {
-            return;
-        }
-        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
-        Objective objective = board.getObjective(config.pointsMain());
-        if (objective == null) {
-            objective = board.registerNewObjective(config.pointsMain(), "dummy");
-            objective.setDisplaySlot(DisplaySlot.SIDEBAR);
-        }
-        objective.displayName(LEGACY.deserialize(nullToEmpty(config.pointsTitle())));
-
-        int rows = Math.max(1, config.pointsRows());
-        int totalPages = Math.max(1, (ranking.size() + rows - 1) / rows);
-        int current = Math.max(1, Math.min(page, totalPages));
-        int from = (current - 1) * rows;
-        int to = Math.min(ranking.size(), from + rows);
-
-        List<String> wanted = new ArrayList<>();
-        for (int index = from; index < to; index++) {
-            PointsService.Entry entry = ranking.get(index);
-            String name = "fmjfb.rank-" + (index - from);
-            wanted.add(name);
-            String text = nullToEmpty(config.pointsLine())
-                    .replace("{rank}", Integer.toString(index + 1))
-                    .replace("{player}", entry.name())
-                    .replace("{points}", Integer.toString(entry.points()));
-            setLine(objective, name, LEGACY.deserialize(text));
-        }
-        // 页脚：页码提示（多于一页时才显示）
-        if (totalPages > 1) {
-            String footer = "fmjfb.page";
-            wanted.add(footer);
-            setLine(objective, footer, LEGACY.deserialize(
-                    "&7第 &f" + current + "&7/&f" + totalPages + " &7页"));
-        }
-        for (String stale : new ArrayList<>(pointEntries)) {
-            if (!wanted.contains(stale)) {
-                board.resetScores(stale);
-            }
-        }
-        pointEntries.clear();
-        pointEntries.addAll(wanted);
     }
 
     /** 把一名玩家的可见计分板还原为服务器主计分板，并收起倒计时条。 */

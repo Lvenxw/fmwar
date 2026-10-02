@@ -57,6 +57,36 @@ public final class ConfigManager {
     /** 本次加载中缺失的必填键（用于 validate 报告，避免靠“值为 0”猜）。 */
     private volatile java.util.Set<String> missingRequired = java.util.Set.of();
 
+    /**
+     * jar 内置默认文案。
+     *
+     * <p>服主的 config.yml 是他自己的文件，插件不会覆盖它——因此升级后新增的文案键
+     * 在他那份文件里并不存在。此前这类缺失会退化成“把键名当文案显示”
+     * （例如界面直接出现 {@code prepare-countdown-bar}），这里改为回退到内置默认文案。</p>
+     */
+    private volatile Map<String, String> defaultMessages = Map.of();
+
+    /** jar 内置的默认文案（供 AlertService 兜底）。 */
+    public Map<String, String> defaultMessages() {
+        return defaultMessages;
+    }
+
+    /** 读取一份配置里的 messages 段。 */
+    private Map<String, String> readMessages(FileConfiguration yaml) {
+        Map<String, String> result = new LinkedHashMap<>();
+        ConfigurationSection section = yaml.getConfigurationSection("messages");
+        if (section == null) {
+            return result;
+        }
+        for (String key : section.getKeys(false)) {
+            Object value = section.get(key);
+            if (value instanceof String text) {
+                result.put(key, text);
+            }
+        }
+        return Map.copyOf(result);
+    }
+
     public ConfigManager(FMWar plugin) {
         this.plugin = plugin;
         this.file = new File(plugin.getDataFolder(), "config.yml");
@@ -82,11 +112,13 @@ public final class ConfigManager {
         }
         FileConfiguration yaml = YamlConfiguration.loadConfiguration(file);
         // 用打包在 jar 里的默认配置补全缺失项，方便版本升级后平滑增项
-        yaml.setDefaults(YamlConfiguration.loadConfiguration(
+        FileConfiguration defaults = YamlConfiguration.loadConfiguration(
                 new java.io.InputStreamReader(
                         java.util.Objects.requireNonNull(
                                 plugin.getResource("config.yml"), "jar 内缺少 config.yml"),
-                        java.nio.charset.StandardCharsets.UTF_8)));
+                        java.nio.charset.StandardCharsets.UTF_8));
+        yaml.setDefaults(defaults);
+        this.defaultMessages = readMessages(defaults);
 
         Settings parsed = parse(yaml);
         Spec.Validation checked = validate(yaml, parsed);
@@ -198,20 +230,12 @@ public final class ConfigManager {
                 yaml.getString("scoreboard.points-line", "&f{rank}. &a{player} &7- &e{points}"),
                 (int) yaml.getLong("scoreboard.points-rows", 10));
 
-        Map<String, String> messages = new LinkedHashMap<>();
-        ConfigurationSection messageSection = yaml.getConfigurationSection("messages");
-        if (messageSection != null) {
-            for (String key : messageSection.getKeys(false)) {
-                Object value = messageSection.get(key);
-                if (value instanceof String text) {
-                    messages.put(key, text);
-                }
-            }
-        }
+        // getConfigurationSection 会合并 defaults，因此这里拿到的已经是
+        // “服主文件 + jar 内置默认”的完整文案表；缺失键的具体兜底逻辑在 AlertService
+        Map<String, String> messages = readMessages(yaml);
         boolean actionbar = Boolean.parseBoolean(messages.getOrDefault("actionbar", "true"));
 
-        List<String> shopIds = new ArrayList<>();
-        for (String id : yaml.getStringList("extra-shops.ids")) {
+        List<String> shopIds = new ArrayList<>();        for (String id : yaml.getStringList("extra-shops.ids")) {
             if (id != null && !id.isBlank()) {
                 shopIds.add(id.trim());
             }
@@ -234,6 +258,11 @@ public final class ConfigManager {
                 yaml.getBoolean("extra-shops.enabled", true),
                 teams,
                 scoreboard,
+                new Settings.Residence(
+                        yaml.getBoolean("residence.enabled", true),
+                        yaml.getString("residence.flag", "move"),
+                        yaml.getStringList("residence.prep-regions"),
+                        yaml.getStringList("residence.arena-regions")),
                 Map.copyOf(messages),
                 actionbar);
     }

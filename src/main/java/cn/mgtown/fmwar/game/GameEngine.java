@@ -34,6 +34,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import cn.mgtown.fmwar.config.Position;
 import cn.mgtown.fmwar.config.Region;
 import cn.mgtown.fmwar.service.PointsService;
+import cn.mgtown.fmwar.service.ResidenceService;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
 import org.bukkit.attribute.Attribute;
@@ -68,6 +69,7 @@ public final class GameEngine {
     private final GameScoreboard scoreboard;
     private final ShopService shops;
     private final PointsService points;
+    private final ResidenceService residence;
 
     /** 受害者 -> 最后一名对其造成伤害的玩家：死亡时据此记击杀分。 */
     private final Map<UUID, UUID> lastDamager = new HashMap<>();
@@ -132,9 +134,6 @@ public final class GameEngine {
 
     /** 最近一次分散的结果摘要，写进开局日志（便于确认落点而不是“又传到场地传送点”）。 */
     private String lastDisperseReport = "未执行";
-    /** 当前查看的积分榜页码（1 起算）。 */
-    private int pointsPage = 1;
-
     /**
      * 调试日志开关（{@code /fmwar debug}）。
      *
@@ -147,7 +146,7 @@ public final class GameEngine {
 
     public GameEngine(FMWar plugin, ConfigService config, AlertService alerts,
                       TeamService teams, GameScoreboard scoreboard, ShopService shops,
-                      PointsService points) {
+                      PointsService points, ResidenceService residence) {
         this.plugin = plugin;
         this.config = config;
         this.alerts = alerts;
@@ -155,17 +154,33 @@ public final class GameEngine {
         this.scoreboard = scoreboard;
         this.shops = shops;
         this.points = points;
+        this.residence = residence;
     }
 
-    /** 供指令改完积分后立刻刷新积分榜。 */
-    public void refreshPointsBoard(Player viewer, int page) {
-        pointsPage = Math.max(1, page);
-        scoreboard.updatePoints(config.settings(), points.ranking(), pointsPage);
-    }
-
-    /** 当前查看的积分榜页码。 */
-    public int pointsPage() {
-        return pointsPage;
+    /**
+     * 修改当前对局的剩余时间（测试用）。
+     *
+     * <p>把阶段计时器的起点往后挪，等价于“把剩余时间改成 seconds 秒”。
+     * 只在 RUNNING 阶段有效；改完会立刻刷新记分板。</p>
+     *
+     * @return 是否修改成功
+     */
+    public boolean setRemainingSeconds(long seconds) {
+        if (phase != GamePhase.RUNNING || timer == null) {
+            return false;
+        }
+        long durationTicks = Math.max(1L, seconds) * 20L;
+        timer = new Timer(GamePhase.RUNNING, Bukkit.getCurrentTick(), durationTicks);
+        // 重置与时间相关的游标，避免 60 秒闸门/加时扣血/绿宝石节奏被旧值干扰
+        lastRemainingTicks = Long.MAX_VALUE;
+        lastEmeraldSecond = 0L;
+        lastOvertimeSecond = -1L;
+        duelTeleported = false;
+        if (config.settings().scoreboard().enabled()) {
+            scoreboard.update(config.settings(), (int) seconds, aliveCount());
+        }
+        plugin.getLogger().info("剩余时间已被指令修改为 " + seconds + " 秒");
+        return true;
     }
 
     /** 供伤害监听上报“谁打了谁”，死亡时据此记击杀分。 */
@@ -235,8 +250,8 @@ public final class GameEngine {
             tickTask = null;
         }
         forceCleanup();
-        // 注销积分榜目标，避免在主计分板上留下一个空目标
-        scoreboard.detachPoints(config.settings().scoreboard().pointsMain());
+        // 强制复位领地权限：绝不能把“临时打开”的状态留在服务器上
+        residence.reset();
         points.save();
     }
 
@@ -345,10 +360,6 @@ public final class GameEngine {
         if (settings.scoreboard().enabled()) {
             long seconds = Math.max(0L, remainingTicks) / 20L;
             scoreboard.update(settings, (int) seconds, alive);
-            // 积分榜：每秒刷新一次即可，不必每 tick 重建条目
-            if (elapsedTicks % 20L == 0L) {
-                scoreboard.updatePoints(settings, points.ranking(), pointsPage);
-            }
         }
 
         // 2) 剩 N 秒时把场内玩家集中到决斗圈
@@ -540,6 +551,11 @@ public final class GameEngine {
         alerts.sendActionBarTo(player, "prepare-progress", Map.of(
                 "clicks", Integer.toString(prepareClicks),
                 "required", Long.toString(required)));
+        // 需求：准备进度要常驻显示（此前只在点按钮时闪过动作栏）
+        String progressText = alerts.render("prepare-progress-bar", Map.of(
+                "clicks", Integer.toString(prepareClicks),
+                "required", Long.toString(required)));
+        scoreboard.showProgress(progressText, prepareClicks / (double) Math.max(1L, required));
         if (prepareClicks >= required) {
             long countdownTicks = Math.max(1L, settings.timing().prepareCountdownSeconds()) * 20L;
             timer = new Timer(GamePhase.PREPARING, Bukkit.getCurrentTick(), countdownTicks);
@@ -561,6 +577,10 @@ public final class GameEngine {
     /** 右键返回大厅按钮：退出队列并回大厅。 */
     public void leaveToHall(Player player) {
         queue.remove(player.getUniqueId());
+        // 队列空了就把准备房间的领地权限恢复为常态关闭
+        if (queue.isEmpty()) {
+            residence.exit("prep");
+        }
         teleport(player, config.settings().location("hall-spawn"));
         teams.leaveAll(player.getUniqueId());
         scoreboard.detach(player);
@@ -599,6 +619,9 @@ public final class GameEngine {
             return false;
         }
         queue.add(player.getUniqueId());
+        // 需求：准备房间的领地常态关闭传送权限。为了把玩家送进去，
+        // 先在入队期间临时打开该领地的权限（队列清空时恢复）。
+        residence.enter("prep");
         teleport(player, config.settings().location("prep-spawn"));
         // 入队即挂上本插件的记分板：准备倒计时的侧栏显示依赖它，
         // 否则玩家在准备房间里看不到常驻倒计时
@@ -673,6 +696,10 @@ public final class GameEngine {
     private void beginGame() {
         Settings settings = config.settings();
         scoreboard.hideCountdown();
+        // 队列即将清空：恢复准备房间领地的常态关闭；同时打开场地领地，
+        // 供开局分散、传决斗圈、观战进场使用（对局结束时恢复）
+        residence.exit("prep");
+        residence.enter("arena");
         phase = GamePhase.RUNNING;
         timer = new Timer(GamePhase.RUNNING, Bukkit.getCurrentTick(), settings.timing().gameDurationSeconds() * 20L);
         members.clear();
@@ -865,8 +892,9 @@ public final class GameEngine {
         Region arena = settings.optionalRegion("arena");
         List<Location> taken = new ArrayList<>();
         for (Player player : onlineMembers()) {
-            Location sample = SafeLocation.sample(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena);            if (sample == null) {
+            // 需求：决斗圈是**以中心为心的正方形**（半边长=半径），不是圆
+            Location sample = SafeLocation.sampleSquare(target, duel.centerX(), duel.centerZ(),
+                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena, duel.centerY());            if (sample == null) {
                 teleport(player, settings.location("arena-spawn"));
                 continue;
             }
@@ -1467,6 +1495,8 @@ public final class GameEngine {
         timer = null;
         ended = false;
         phase = GamePhase.IDLE;
+        // 对局结束：把两处领地权限都恢复为服务器设定的常态（准备房间关闭、场地按服主配置）
+        residence.reset();
         // 刻意不清 pendingHall：它描述的是“离线玩家下次上线怎么处理”，
         // 生命周期跨越对局边界。若在这里清空，对局中掉线、结束后才上线的玩家会失去标记，
         // 直接以登出坐标留在场地里（需求 108 / 39 落空）。

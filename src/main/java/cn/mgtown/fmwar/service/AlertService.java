@@ -61,6 +61,15 @@ public final class AlertService {
     public String render(String messageKey, Map<String, String> placeholders) {
         Settings settings = config.settings();
         String raw = settings.message(messageKey);
+        // 服主的 config.yml 是他自己的文件，插件不会覆盖它——升级后新增的文案键
+        // 在他那份里并不存在。此时退回 jar 内置默认文案，而不是把键名
+        //（例如 prepare-countdown-bar）直接显示给玩家。
+        if (raw.equals(messageKey)) {
+            String fallback = config.manager().defaultMessages().get(messageKey);
+            if (fallback != null) {
+                raw = fallback;
+            }
+        }
         String plain = settings.prefix() == null ? "" : settings.prefix();
         String war = settings.warPrefix() == null ? plain : settings.warPrefix();
         // “玩家动向”那几条保持原色，其余一律 light_purple
