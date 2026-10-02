@@ -312,30 +312,61 @@ public final class GameEngine {
             return;
         }
         if (timer != null) {
+            // 倒计时期间人数不足两人：取消倒计时并重置进度。
+            // 这条必须在这里兜住：玩家在倒计时中返回大厅时，队列会先变少，
+            // 而 syncPrepRoster 里那次判定可能被“名单未变化”提前 return 跳过，
+            // 于是只剩一个人的倒计时会一直挂着（表现为“卡住”）。
+            if (queuedInRoom() < 2) {
+                cancelCountdown("prepare-cancel-not-enough");
+                return;
+            }
             long remainingTicks = timer.remainingTicks(now);
             long remaining = TimeUtil.ceilSeconds(remainingTicks);
-            // 双通道常驻显示：BossBar（顶部）+ 侧栏（兜底，侧栏百分百会渲染）
+            // 只发给队列内的玩家：不在游戏里的玩家不该看到这条
+            List<Player> viewers = queuePlayers();
             String text = alerts.render("prepare-countdown-bar", Map.of("seconds", Long.toString(remaining)));
-            String sidebarTitle = alerts.render("prepare-countdown-title", Map.of());
-            String sidebarLine = alerts.render("prepare-countdown-line",
-                    Map.of("seconds", Long.toString(remaining)));
             double progress = timer.durationTicks() <= 0
                     ? 0.0
                     : Math.max(0.0, Math.min(1.0, remainingTicks / (double) timer.durationTicks()));
-            scoreboard.showCountdown(text, sidebarTitle, sidebarLine, progress);
+            scoreboard.showCountdown(text, progress, viewers);
             if (remaining != lastCountdownSecond) {
                 lastCountdownSecond = remaining;
-                plugin.getLogger().info("准备倒计时：剩余 " + remaining + " 秒（房间内已入队 "
-                        + queuedInRoom() + " 人）");
-                for (UUID uuid : queue) {
-                    Player player = Bukkit.getPlayer(uuid);
-                    if (player != null) {
-                        alerts.sendActionBarTo(player, "prepare-countdown",
-                                Map.of("seconds", Long.toString(remaining)));
-                    }
+                debug("准备倒计时：剩余 " + remaining + " 秒（房间内已入队 " + queuedInRoom() + " 人）");
+                for (Player player : viewers) {
+                    alerts.sendActionBarTo(player, "prepare-countdown",
+                            Map.of("seconds", Long.toString(remaining)));
                 }
             }
         }
+    }
+
+    /** 队列内仍在线的玩家。 */
+    private List<Player> queuePlayers() {
+        List<Player> players = new ArrayList<>();
+        for (UUID uuid : queue) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
+                players.add(player);
+            }
+        }
+        return players;
+    }
+
+    /**
+     * 取消准备倒计时并把进度清零，向队列内的玩家提示原因。
+     *
+     * @param messageKey 提示文案键
+     */
+    private void cancelCountdown(String messageKey) {
+        if (timer == null) {
+            return;
+        }
+        debug("准备倒计时被取消：" + messageKey + "（房间内已入队 " + queuedInRoom() + " 人）");
+        timer = null;
+        prepareClicks = 0;
+        lastCountdownSecond = -1L;
+        scoreboard.hideCountdown();
+        alerts.broadcastTo(queuePlayers(), messageKey, Map.of());
     }
 
     private void tickRunning(long now) {
@@ -490,14 +521,8 @@ public final class GameEngine {
         }
 
         if (timer != null) {
-            // 倒计时期间准备房间内已入队人数不足两人：退回准备阶段并提示
-            if (queuedInRoom() < 2) {
-                debug("倒计时被取消：准备房间内已入队人数降到 " + queuedInRoom() + " 人");
-                timer = null;
-                prepareClicks = 0;
-                lastCountdownSecond = -1L;
-                alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
-            }
+            // 倒计时期间的取消判定统一走 cancelCountdown（含提示与隐藏显示条）
+            cancelCountdown("prepare-cancel-not-enough");
             return;
         }
 
@@ -551,11 +576,11 @@ public final class GameEngine {
         alerts.sendActionBarTo(player, "prepare-progress", Map.of(
                 "clicks", Integer.toString(prepareClicks),
                 "required", Long.toString(required)));
-        // 需求：准备进度要常驻显示（此前只在点按钮时闪过动作栏）
+        // 需求：准备进度要常驻显示（此前只在点按钮时闪过动作栏），且只发给队列内的玩家
         String progressText = alerts.render("prepare-progress-bar", Map.of(
                 "clicks", Integer.toString(prepareClicks),
                 "required", Long.toString(required)));
-        scoreboard.showProgress(progressText, prepareClicks / (double) Math.max(1L, required));
+        scoreboard.showProgress(progressText, prepareClicks / (double) Math.max(1L, required), queuePlayers());
         if (prepareClicks >= required) {
             long countdownTicks = Math.max(1L, settings.timing().prepareCountdownSeconds()) * 20L;
             timer = new Timer(GamePhase.PREPARING, Bukkit.getCurrentTick(), countdownTicks);
@@ -894,7 +919,8 @@ public final class GameEngine {
         for (Player player : onlineMembers()) {
             // 需求：决斗圈是**以中心为心的正方形**（半边长=半径），不是圆
             Location sample = SafeLocation.sampleSquare(target, duel.centerX(), duel.centerZ(),
-                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena, duel.centerY());            if (sample == null) {
+                    duel.radius(), duel.minSpacing(), duel.maxAttempts(), taken, arena, duel.centerY());
+            if (sample == null) {
                 teleport(player, settings.location("arena-spawn"));
                 continue;
             }
@@ -920,6 +946,7 @@ public final class GameEngine {
             plugin.getLogger().warning("奖励箱内容行为空（chests.loot-groups），不会生成任何奖励箱");
             return;
         }
+        boolean booksOnly = config.settings().start().lootBooksOnly();
         ThreadLocalRandom random = ThreadLocalRandom.current();
         int placed = 0;
         int totalItems = 0;
@@ -929,6 +956,15 @@ public final class GameEngine {
                 plugin.getLogger().warning("奖励箱坐标世界未加载: " + position.world());
                 continue;
             }
+            World target = location.getWorld();
+            // 先确保区块已加载：未加载时 getState() 拿不到真正的方块实体，
+            // 置物会“看起来成功”但内容丢失（官方示例同样是先 loadChunk 再取箱子）
+            int chunkX = location.getBlockX() >> 4;
+            int chunkZ = location.getBlockZ() >> 4;
+            if (!target.isChunkLoaded(chunkX, chunkZ)) {
+                target.loadChunk(chunkX, chunkZ);
+            }
+
             Block block = location.getBlock();
             // 只覆盖空气或可替换方块：避免把别人放的建筑直接抹掉，同时保留已有的箱子（只填内容）
             if (block.getType() != Material.CHEST && !block.isReplaceable()) {
@@ -938,29 +974,32 @@ public final class GameEngine {
             }
             if (block.getType() != Material.CHEST) {
                 block.setType(Material.CHEST, false);
+                // setType 之后重新取一次方块引用，确保拿到新建的方块实体
+                block = location.getBlock();
             }
-            // 用 getState() 拿到真实的方块实体；置物后 update(true, true) 同时刷新方块数据与方块实体
             if (!(block.getState() instanceof Chest chest)) {
                 plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
-                        + " 无法取得箱子方块实体，已跳过");
+                        + " 无法取得箱子方块实体（区块是否已加载？），已跳过");
                 continue;
             }
             List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
-            List<ItemStack> items = plugin.lootParser().parseGroup(group);
+            List<ItemStack> items = plugin.lootParser().parseGroup(group, booksOnly);
             if (items.isEmpty()) {
                 plugin.getLogger().warning("奖励箱内容行解析后为空，该箱未放入任何物品：" + group
                         + " —— 多半是附魔键在本服未注册，可用 /fmwar doctor 查看");
             }
-            for (int slot = 0; slot < items.size() && slot < chest.getInventory().getSize(); slot++) {
-                chest.getInventory().setItem(slot, items.get(slot));
+            // 直接往箱子 Inventory 里放，再 update() 落盘（与官方示例一致）
+            for (ItemStack item : items) {
+                chest.getInventory().addItem(item);
             }
-            chest.update(true, true);
+            chest.update();
             chests.add(block.getLocation());
             placed++;
             totalItems += items.size();
         }
         plugin.getLogger().info("奖励箱：已生成 " + placed + "/" + loot.chestLocations().size()
-                + " 个，共放入 " + totalItems + " 件物品");
+                + " 个，共放入 " + totalItems + " 件"
+                + (booksOnly ? "附魔书" : "物品"));
     }
 
     private void clearChests() {

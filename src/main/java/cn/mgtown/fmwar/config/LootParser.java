@@ -43,9 +43,14 @@ public final class LootParser {
 
     /** 解析一行物品（可含 , 或 、 分隔的多个附魔片段）。 */
     public List<ItemStack> parseGroup(List<String> spec) {
+        return parseGroup(spec, false);
+    }
+
+    /** 解析一行物品；{@code booksOnly} 为 true 时全部产出附魔书。 */
+    public List<ItemStack> parseGroup(List<String> spec, boolean booksOnly) {
         List<ItemStack> items = new ArrayList<>();
         for (String raw : spec) {
-            ItemStack item = parse(raw);
+            ItemStack item = parse(raw, booksOnly);
             if (item != null) {
                 items.add(item);
             }
@@ -89,8 +94,14 @@ public final class LootParser {
         return keys;
     }
 
-    /** 解析单个物品定义；失败返回 null 并回调 warn。 */
-    public ItemStack parse(String raw) {
+    /**
+     * 解析单个物品定义；失败返回 null 并回调 warn。
+     *
+     * <p>{@code booksOnly} 为 true 时把材质名当作**标签忽略**，一律产出附魔书：
+     * 这样配置里可以继续写“下界合金剑：6 级重叠网络”这种人类可读的描述，
+     * 而不要求材质名真实存在。</p>
+     */
+    public ItemStack parse(String raw, boolean booksOnly) {
         if (raw == null || raw.isBlank()) {
             return null;
         }
@@ -99,19 +110,10 @@ public final class LootParser {
         String materialPart = colon < 0 ? text : text.substring(0, colon);
         String rest = colon < 0 ? "" : text.substring(colon + 1);
 
-        Material material = Material.matchMaterial(materialPart.trim().toUpperCase(java.util.Locale.ROOT));
-        if (material == null) {
-            // 兜底：按 Bukkit 的 key 再找一次（兼容带命名空间或小写 id 的写法，
-            // 例如 minecraft:netherite_spear / netherite_hoe）
-            String key = materialPart.trim().toLowerCase(java.util.Locale.ROOT);
-            if (!key.contains(":")) {
-                key = "minecraft:" + key;
-            }
-            try {
-                material = Registry.MATERIAL.get(NamespacedKey.fromString(key));
-            } catch (RuntimeException exception) {
-                material = null;
-            }
+        Material material = resolveMaterial(materialPart);
+        if (booksOnly) {
+            // 只产出附魔书：材质名仅作标签
+            return buildEnchantedBook(raw, rest);
         }
         if (material == null || material.isAir()) {
             warn.accept("物品材质无法识别: " + raw);
@@ -122,7 +124,90 @@ public final class LootParser {
         if (rest.isBlank()) {
             return item;
         }
+        applyFragments(item, raw, rest);
+        return item;
+    }
 
+    /** 解析单个物品（默认按武器/装备处理）。 */
+    public ItemStack parse(String raw) {
+        return parse(raw, false);
+    }
+
+    /** 材质解析：先按大写名，再按 Bukkit key 兜底。 */
+    private Material resolveMaterial(String part) {
+        Material material = Material.matchMaterial(part.trim().toUpperCase(java.util.Locale.ROOT));
+        if (material != null) {
+            return material;
+        }
+        String key = part.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!key.contains(":")) {
+            key = "minecraft:" + key;
+        }
+        try {
+            return Registry.MATERIAL.get(NamespacedKey.fromString(key));
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    /**
+     * 把一行内容做成附魔书。
+     *
+     * <p>只处理附魔片段；{@code potion}/{@code amplifier} 这类药水片段对附魔书无意义，
+     * 会被忽略（它们只用于药水箭）。</p>
+     */
+    private ItemStack buildEnchantedBook(String raw, String rest) {
+        ItemStack book = new ItemStack(Material.ENCHANTED_BOOK);
+        ItemMeta meta = book.getItemMeta();
+        if (meta == null) {
+            warn.accept("无法获取附魔书的物品元数据: " + raw);
+            return null;
+        }
+        int applied = 0;
+        if (!rest.isBlank()) {
+            for (String fragment : rest.split("[;,]|、")) {
+                String piece = fragment.trim();
+                if (piece.isEmpty()) {
+                    continue;
+                }
+                int equals = piece.indexOf('=');
+                if (equals <= 0) {
+                    warn.accept("附魔片段缺少 = 等级: " + piece + "（条目: " + raw + "）");
+                    continue;
+                }
+                String keyText = piece.substring(0, equals).trim();
+                if (keyText.equalsIgnoreCase("potion") || keyText.equalsIgnoreCase("amplifier")) {
+                    continue;
+                }
+                int level = parseInt(piece.substring(equals + 1).trim(), 0);
+                if (level <= 0) {
+                    warn.accept("附魔等级必须是正整数: " + piece + "（条目: " + raw + "）");
+                    continue;
+                }
+                NamespacedKey key = toKey(keyText);
+                Enchantment enchantment = key == null ? null : Registry.ENCHANTMENT.get(key);
+                if (enchantment == null) {
+                    warn.accept("附魔不存在（本服未注册该键，需数据包或插件提供）: " + keyText + "（条目: " + raw + "）");
+                    continue;
+                }
+                // 附魔用 addEnchant(..., true) 忽略等级上限，与示例一致
+                meta.addEnchant(enchantment, level, true);
+                applied++;
+            }
+        }
+        if (applied == 0) {
+            warn.accept("该行没有任何有效附魔，附魔书内容为空: " + raw);
+            return null;
+        }
+        // 用原始描述作为书名，箱子里一眼能看出这是什么
+        // （用 ItemMeta 的字符串 API，避免让本类依赖 Adventure 类型）
+        meta.setDisplayName("§e" + raw.trim());
+        book.setItemMeta(meta);
+        return book;
+    }
+
+    /** 把附魔/药水片段应用到物品上。 */
+    private void applyFragments(ItemStack item, String raw, String rest) {
         for (String fragment : rest.split("[;,]|、")) {
             String piece = fragment.trim();
             if (piece.isEmpty()) {
@@ -162,7 +247,6 @@ public final class LootParser {
             // 绕过等级上限与适用性限制：需求文档明确要求 255 级钓竿这类越界附魔
             item.addUnsafeEnchantment(enchantment, level);
         }
-        return item;
     }
 
     /** 把 "{@code minecraft:lure=255}" 这类键值解析成附魔表（用于开局钓竿）。 */

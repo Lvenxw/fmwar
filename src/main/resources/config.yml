@@ -153,6 +153,9 @@ start:
   # 是否在提示接收范围内一并禁止潜行。
   # 默认 false：需求里的“坐下/躺下/趴下”由坐姿插件提供，原版只有潜行可拦，容易误伤。
   block-sneak: false
+  # 奖励箱只产出附魔书（enchanted_book），不直接给武器装备。
+  # 打开后 chests.loot-groups 里的材质名只作标签，不再需要是合法材质。
+  loot-books-only: true
   # 抗性提升（tick）
   resistance:
     enabled: true
@@ -277,10 +280,10 @@ messages:
   # 准备进度也常驻显示在屏幕上方（BossBar），格式 {clicks}/{required}
   prepare-progress-bar: '{war_prefix}&e准备进度 &f{clicks}&7/&f{required}&e（由队伍成员共同累计）'
   prepare-progress: '{prefix}&e准备中 &f{clicks}&7/&f{required}'
-  # 倒计时常驻显示：BossBar（顶部）+ 侧栏兜底（侧栏百分百会渲染）
+  # 倒计时常驻显示条（屏幕上方 BossBar，只发给队列内的玩家）
   prepare-countdown-bar: '{war_prefix}&e游戏将在 &f{seconds} &e秒后开始'
-  prepare-countdown-title: '&6附魔战争'
-  prepare-countdown-line: '&e游戏开始 &f{seconds}'
+  # 倒计时期间人数不足两人时的取消提示
+  prepare-cancel-not-enough: '{war_prefix}&c准备房间内已入队人数不足两人，准备进度已重置'
   prepare-need-two: '{prefix}&c准备房间内至少需要两名已入队玩家'
   prepare-announce: '{war_prefix}&a准备完成，&f{seconds} &a秒后开始游戏'
   prepare-reset: '{prefix}&c有玩家进入准备房间，准备进度已重置'

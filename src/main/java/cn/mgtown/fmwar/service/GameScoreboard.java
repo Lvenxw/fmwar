@@ -12,6 +12,7 @@ import org.bukkit.scoreboard.Score;
 import org.bukkit.scoreboard.Scoreboard;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -101,45 +102,71 @@ public final class GameScoreboard {
         }
     }
 
-    /** 显示/刷新准备倒计时：BossBar + 侧栏双通道。 */
-    public void showCountdown(String text, String sidebarTitle, String sidebarLine, double progress) {
+    /**
+     * 显示/刷新准备倒计时：BossBar + 侧栏双通道。
+     *
+     * <p>倒计时阶段**不占用右侧记分板**（那条已被 {@link #hideCountdown()} 收起），
+     * 只用 BossBar 显示；BossBar 也只发给队列内的玩家。</p>
+     *
+     * @param viewers 应当看到这条的玩家；传 null 表示所有在线玩家
+     */
+    public void showCountdown(String text, double progress, Collection<Player> viewers) {
         countdownActive = true;
-
-        // 通道 1：BossBar（progress < 0 表示这条只用于准备进度，不显示进度条比例）
         bossBar.name(LEGACY.deserialize(nullToEmpty(text)));
         bossBar.progress(progress < 0 ? 1.0f : (float) Math.max(0.0, Math.min(1.0, progress)));
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            if (countdownViewers.add(player.getUniqueId())) {
-                player.showBossBar(bossBar);
-            }
-        }
-
-        // 通道 2：侧栏（同一块自建计分板，用独立目标，接管 SIDEBAR 显示位）
-        Scoreboard board = teams.scoreboard();
-        if (countdownObjective == null || countdownObjective.getScoreboard() != board) {
-            countdownObjective = board.getObjective(COUNTDOWN_OBJECTIVE);
-            if (countdownObjective == null) {
-                countdownObjective = board.registerNewObjective(COUNTDOWN_OBJECTIVE, "dummy");
-            }
-        }
-        countdownObjective.displayName(LEGACY.deserialize(nullToEmpty(sidebarTitle)));
-        countdownObjective.setDisplaySlot(DisplaySlot.SIDEBAR);
-        Score score = countdownObjective.getScore(COUNTDOWN_ENTRY);
-        score.setScore(1);
-        score.customName(LEGACY.deserialize(nullToEmpty(sidebarLine)));
+        refreshViewers(viewers);
     }
 
     /**
      * 只显示准备进度（不动侧栏）。
      *
-     * <p>准备阶段大多数时间只有进度可看，此时不该让侧栏显示一条无关的倒计时行。</p>
+     * <p>准备阶段只有进度可看，此时不该占用侧栏；而且**只发给队列内的玩家**——
+     * 不然不在游戏里的玩家也会看到“准备进度 3/7”。</p>
+     *
+     * @param viewers 应当看到这条的玩家；传 null 表示所有在线玩家
      */
-    public void showProgress(String text, double progress) {
+    public void showProgress(String text, double progress, Collection<Player> viewers) {
         countdownActive = true;
         bossBar.name(LEGACY.deserialize(nullToEmpty(text)));
         bossBar.progress((float) Math.max(0.0, Math.min(1.0, progress)));
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            if (countdownViewers.add(player.getUniqueId())) {
+        refreshViewers(viewers);
+    }
+
+    /**
+     * 刷新“谁应当看到准备阶段的显示条”，并隐藏其余玩家的。
+     *
+     * <p>这条很重要：BossBar 是广播式的，如果只调用 showBossBar 而不撤销，
+     * 已经离开队列的玩家会一直挂着进度条。</p>
+     */
+    private void refreshViewers(Collection<Player> viewers) {
+        Set<UUID> wanted = new HashSet<>();
+        if (viewers == null) {
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                wanted.add(player.getUniqueId());
+            }
+        } else {
+            for (Player player : viewers) {
+                if (player != null && player.isOnline()) {
+                    wanted.add(player.getUniqueId());
+                }
+            }
+        }
+        for (UUID uuid : new HashSet<>(countdownViewers)) {
+            if (wanted.contains(uuid)) {
+                continue;
+            }
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
+                player.hideBossBar(bossBar);
+            }
+            countdownViewers.remove(uuid);
+        }
+        for (UUID uuid : wanted) {
+            if (!countdownViewers.add(uuid)) {
+                continue;
+            }
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
                 player.showBossBar(bossBar);
             }
         }

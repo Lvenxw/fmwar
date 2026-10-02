@@ -120,6 +120,7 @@ public record Settings(
     public record Start(boolean clearInventory,
                         boolean clearEffects,
                         boolean blockSneak,
+                        boolean lootBooksOnly,
                         boolean resistanceEnabled,
                         long resistanceDurationTicks,
                         int resistanceAmplifier,

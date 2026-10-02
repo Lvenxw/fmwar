@@ -177,6 +177,7 @@ public final class ConfigManager {
                 yaml.getBoolean("start.clear-inventory", true),
                 yaml.getBoolean("start.clear-effects", true),
                 yaml.getBoolean("start.block-sneak", false),
+                yaml.getBoolean("start.loot-books-only", true),
                 yaml.getBoolean("start.resistance.enabled", true),
                 yaml.getLong("start.resistance.duration-ticks", 100),
                 (int) yaml.getLong("start.resistance.amplifier", 4),
