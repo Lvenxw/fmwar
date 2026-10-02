@@ -321,6 +321,15 @@ messages:
   prepare-countdown: '{prefix}&e游戏将在 &f{seconds} &e秒后开始'
   duel-teleport: '{prefix}&c决斗时间！'
   game-start: '{prefix}&a游戏开始！'
+  # 开局规则说明，紧跟 game-start 之后广播。
+  # 用 |- 块标量保留换行：渲染出来是一个带 \n 的字符串，
+  # 整条广播时由聊天组件按行渲染。
+  # 注意 |- 前后的缩进必须比 game-rule 深，且块内每一行都用同样缩进。
+  game-rule: |-
+    &7· &f在此处，铁砧附魔无需经验，并且除黄色和蓝色词条以外的冲突附魔均可共存，装备不再有词条上限，铁砧不会随机生成诅咒
+    &7· &f用钓竿快速获取附魔书
+    &7· &f每隔 &e{interval}s &f获得一个绿宝石，可在村民处交易
+    &7· &f决出最后的一位赢家
   game-already-running: '{prefix}&c游戏已经开始，暂时无法加入'
   spectator-unavailable: '{prefix}&c当前没有进行中的对局，无法观战'
   spectator-only-in-game: '{prefix}&c你正在游戏中，无法观战'

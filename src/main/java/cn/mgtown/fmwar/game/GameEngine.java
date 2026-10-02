@@ -832,6 +832,9 @@ public final class GameEngine {
         // 先广播“游戏开始”再做传送与发放：这样玩家一定能看到开局提示，
         // 即使后续某一步（分散/放箱/生成商店）出错也不会静默
         alerts.broadcast("game-start", Map.of());
+        // 规则说明紧跟“游戏开始”，同样在传送之前发出：广播是同步的、分散传送是异步的，
+        // 因此玩家一定是在原地看完规则之后才被传送，聊天栏顺序不会错乱
+        broadcastGameRules();
         disperse(participants);
         for (Player player : participants) {
             applyStartState(player);
@@ -845,6 +848,21 @@ public final class GameEngine {
         }
         plugin.getLogger().info("对局开始：参战 " + participants.size() + " 人，"
                 + "分散落点 " + lastDisperseReport);
+    }
+
+    /**
+     * 开局规则说明：紧跟 {@code game-start} 之后广播。
+     *
+     * <p>{@code messages.game-rule} 用 YAML 的 {@code |-} 块写成多行，渲染结果里带
+     * 换行符。整条作为一条聊天消息发出，客户端会按 {@code \n} 逐行渲染，因此这里
+     * 不需要在代码里拆分。</p>
+     *
+     * <p>{@code {interval}} 取自 {@code timing.emerald-interval}（当前配置为 30），
+     * 这样规则文案和实际发放节奏始终一致——服主改了间隔，这行会跟着变。</p>
+     */
+    private void broadcastGameRules() {
+        long interval = Math.max(1L, config.settings().timing().emeraldIntervalSeconds());
+        alerts.broadcast("game-rule", Map.of("interval", Long.toString(interval)));
     }
 
     /**
