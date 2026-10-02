@@ -1056,6 +1056,23 @@ public final class GameEngine {
             teleport(player, sample);
             alerts.sendActionBarTo(player, "duel-teleport", Map.of());
         }
+
+        // 观战者一并送进本局选定的那个决斗圈，直接落在圈中心的安全位（fallback）：
+        // 不参与落点采样——旁观模式没有碰撞体积，多人重叠没有影响，
+        // 集中在中心反而能看清对决。决斗圈区域本就落在 arena 之内，
+        // 因此这里不会触发 checkArenaPresence 里的“观战者离场”。
+        int spectators = 0;
+        for (Player spectator : onlineSpectators()) {
+            teleport(spectator, fallback);
+            alerts.sendActionBarTo(spectator, "duel-teleport", Map.of());
+            spectators++;
+        }
+        if (spectators > 0) {
+            debug("决斗圈：已把 " + spectators + " 名观战者传送到圈中心点（"
+                    + fallback.getBlockX() + "," + fallback.getBlockY() + ","
+                    + fallback.getBlockZ() + "）");
+        }
+
         if (fallbackCount > 0) {
             plugin.getLogger().warning("决斗圈：" + fallbackCount + " 名玩家未能采样到落点，"
                     + "已使用兜底点（" + fallback.getBlockX() + "," + fallback.getBlockY() + ","
