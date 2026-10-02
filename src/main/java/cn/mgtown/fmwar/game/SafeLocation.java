@@ -94,7 +94,8 @@ public final class SafeLocation {
                 continue;
             }
             // 地形落差可能让实际落脚点偏出场地边界，落地后再确认一次
-            if (within != null && !within.contains(candidate)) {
+            if (within != null
+                    && !within.containsXZ(world.getName(), candidate.getX(), candidate.getZ())) {
                 continue;
             }
             boolean tooClose = false;
@@ -139,7 +140,8 @@ public final class SafeLocation {
             if (candidate == null) {
                 continue;
             }
-            if (within != null && !within.contains(candidate)) {
+            if (within != null
+                    && !within.containsXZ(world.getName(), candidate.getX(), candidate.getZ())) {
                 continue;
             }
             boolean tooClose = false;
