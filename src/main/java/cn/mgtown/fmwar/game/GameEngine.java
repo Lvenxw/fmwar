@@ -355,14 +355,18 @@ public final class GameEngine {
     /**
      * 取消准备倒计时并把进度清零，向队列内的玩家提示原因。
      *
+     * <p>必须把 {@code phase} 退回 {@link GamePhase#IDLE}：否则“游戏已经开始”的状态会残留，
+     * 玩家在倒计时被取消后点“加入游戏”仍会被拒绝。</p>
+     *
      * @param messageKey 提示文案键
      */
     private void cancelCountdown(String messageKey) {
-        if (timer == null) {
+        if (timer == null && phase != GamePhase.PREPARING) {
             return;
         }
         debug("准备倒计时被取消：" + messageKey + "（房间内已入队 " + queuedInRoom() + " 人）");
         timer = null;
+        phase = GamePhase.IDLE;
         prepareClicks = 0;
         lastCountdownSecond = -1L;
         scoreboard.hideCountdown();
@@ -520,17 +524,23 @@ public final class GameEngine {
             }
         }
 
-        if (timer != null) {
-            // 倒计时在跑：本轮只做名单同步，是否取消交给 tickPreparing 统一判定
-            //（取消需要“人数不足”这个条件，绝不能无条件取消——那会让倒计时刚起步就被重置）
-            return;
-        }
-
         // 需求 37：只在“有玩家新进入”时清零准备进度。
         // 判定本身放在 PrepRoom 里并被断言覆盖——离开与名单不变都不该清零进度。
+        // 注意：这段必须在倒计时的提前 return **之前**执行，否则“倒计时中有人新进房间”
+        // 时进度不会被清空（曾经的缺陷）。
         if (PrepRoom.shouldResetProgress(previous, current, prepareClicks)) {
+            debug("准备进度由 " + prepareClicks + " 清零：新进入 " + entered.size() + " 人");
             prepareClicks = 0;
             alerts.broadcastTo(onlinePlayers(current), "prepare-reset", Map.of());
+        } else if (!entered.isEmpty()) {
+            debug("有 " + entered.size() + " 人新进入准备房间，但当前进度为 " + prepareClicks + "，无需清零");
+        }
+
+        if (timer != null) {
+            // 倒计时在跑：本轮只做名单同步与进度清零，是否取消交给 tickPreparing 统一判定
+            //（取消需要“人数不足”或“有人新进入”这些条件，绝不能无条件取消——
+            //  那会让倒计时刚起步就被重置）
+            return;
         }
     }
 
@@ -633,8 +643,12 @@ public final class GameEngine {
     }
 
     public boolean tryJoinQueue(Player player) {
-        if (phase != GamePhase.IDLE) {
-            // 对局中、结算中与准备倒计时中都不再接收新玩家
+        // 需求：准备倒计时期间也允许加入队列——新玩家进入意味着“有人进入准备房间”，
+        // 此时应当取消倒计时并重置准备进度，而不是把大厅里的人挡在门外。
+        if (phase == GamePhase.PREPARING) {
+            cancelCountdown("prepare-cancel-joined");
+        } else if (phase != GamePhase.IDLE) {
+            // 对局中与结算中确实不该再接收新玩家
             alerts.sendTo(player, "game-already-running", Map.of());
             return false;
         }
@@ -648,8 +662,7 @@ public final class GameEngine {
         // 先在入队期间临时打开该领地的权限（队列清空时恢复）。
         residence.enter("prep");
         teleport(player, config.settings().location("prep-spawn"));
-        // 入队即挂上本插件的记分板：准备倒计时的侧栏显示依赖它，
-        // 否则玩家在准备房间里看不到常驻倒计时
+        // 入队即挂上本插件的记分板：准备倒计时与进度的常驻显示依赖它
         scoreboard.attach(player, config.settings());
         alerts.sendTo(player, "queue-joined-self", Map.of());
         alerts.broadcast("queue-join", Map.of("player", player.getName()));

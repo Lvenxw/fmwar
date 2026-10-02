@@ -203,7 +203,7 @@ chests:
     - - 'MACE:union=1'
       - 'NETHERITE_HOE:union=1'
     - - 'TRIDENT:daedalus=1,loyalty=3'
-    - - 'NETHERITE_SPEAR:faith=1,lunge=5'
+    - - 'TRIDENT:faith=1,lunge=5'
     - - 'CROSSBOW:fusion_strike=1'
     - - 'BOW:eternal=1'
       - 'TIPPED_ARROW:potion=instant_damage;amplifier=1'
@@ -284,6 +284,8 @@ messages:
   prepare-countdown-bar: '{war_prefix}&e游戏将在 &f{seconds} &e秒后开始'
   # 倒计时期间人数不足两人时的取消提示
   prepare-cancel-not-enough: '{war_prefix}&c准备房间内已入队人数不足两人，准备进度已重置，请重新点满准备按钮'
+  # 倒计时期间有新玩家加入队列时的取消提示
+  prepare-cancel-joined: '{war_prefix}&e有玩家加入队列，倒计时已取消，准备进度重新累计'
   prepare-need-two: '{prefix}&c准备房间内至少需要两名已入队玩家'
   prepare-announce: '{war_prefix}&a准备完成，&f{seconds} &a秒后开始游戏'
   prepare-reset: '{prefix}&c有玩家进入准备房间，准备进度已重置'

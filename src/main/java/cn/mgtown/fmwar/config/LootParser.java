@@ -100,6 +100,11 @@ public final class LootParser {
      * <p>{@code booksOnly} 为 true 时把材质名当作**标签忽略**，一律产出附魔书：
      * 这样配置里可以继续写“下界合金剑：6 级重叠网络”这种人类可读的描述，
      * 而不要求材质名真实存在。</p>
+     *
+     * <p><b>例外</b>：整行只有药水片段（{@code potion=} / {@code amplifier=}）时，
+     * 它本来就不是附魔产物（例如 {@code TIPPED_ARROW:potion=instant_damage;amplifier=1}），
+     * 强行做成附魔书只会得到一本空书。这类条目改为按原材质产出真实物品——
+     * 此时材质名必须是合法材质。</p>
      */
     public ItemStack parse(String raw, boolean booksOnly) {
         if (raw == null || raw.isBlank()) {
@@ -111,12 +116,16 @@ public final class LootParser {
         String rest = colon < 0 ? "" : text.substring(colon + 1);
 
         Material material = resolveMaterial(materialPart);
-        if (booksOnly) {
-            // 只产出附魔书：材质名仅作标签
+        if (producesBook(booksOnly, rest)) {
+            // 有真正的附魔片段：材质名仅作标签，产出附魔书
             return buildEnchantedBook(raw, rest);
         }
         if (material == null || material.isAir()) {
-            warn.accept("物品材质无法识别: " + raw);
+            // booksOnly 模式下材质名只是标签，只有“没有附魔片段”的条目才真的需要它，
+            // 因此提示里把这一点说清楚，免得服主去查一个其实无关的材质名
+            warn.accept(booksOnly
+                    ? "物品材质无法识别: " + raw + "（该行没有附魔片段，需要真实材质名）"
+                    : "物品材质无法识别: " + raw);
             return null;
         }
 
@@ -126,6 +135,44 @@ public final class LootParser {
         }
         applyFragments(item, raw, rest);
         return item;
+    }
+
+    /**
+     * 该行在 booksOnly 模式下是否产出**附魔书**。
+     *
+     * <p>抽成纯静态函数是为了能被断言直接钉住：它决定了“药水箭要不要被改造成附魔书”
+     * 这一类看起来不合理的转换。</p>
+     *
+     * @param booksOnly 是否开启了“奖励箱只产出附魔书”
+     * @param rest      {@code <材质>} 之后的部分（即 {@code :} 后面的片段）
+     */
+    public static boolean producesBook(boolean booksOnly, String rest) {
+        return booksOnly && hasEnchantFragment(rest);
+    }
+
+    /**
+     * 该行的片段里是否包含**真正的附魔**。
+     *
+     * <p>只有 {@code potion} / {@code amplifier} 时返回 false——那是药水属性，
+     * 做成附魔书没有意义。</p>
+     */
+    private static boolean hasEnchantFragment(String rest) {
+        if (rest == null || rest.isBlank()) {
+            return false;
+        }
+        for (String fragment : rest.split("[;,]|、")) {
+            String piece = fragment.trim();
+            if (piece.isEmpty()) {
+                continue;
+            }
+            int equals = piece.indexOf('=');
+            String key = equals <= 0 ? piece : piece.substring(0, equals).trim();
+            if (key.equalsIgnoreCase("potion") || key.equalsIgnoreCase("amplifier")) {
+                continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     /** 解析单个物品（默认按武器/装备处理）。 */
