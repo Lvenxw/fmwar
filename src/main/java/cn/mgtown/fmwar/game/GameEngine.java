@@ -451,6 +451,7 @@ public final class GameEngine {
             Player winner = alive.get(0);
             alerts.broadcast("win", Map.of("player", winner.getName()));
             eliminate(winner, null, false);
+            resetWinnerState(winner);
         } else {
             alerts.broadcast("no-survivor", Map.of());
         }
@@ -1217,6 +1218,33 @@ public final class GameEngine {
         }
     }
 
+    /**
+     * 胜者回大厅后的“状态复原”：满血、满饥饿、清火、清药水效果、清空中的空气。
+     *
+     * <p>刻意不碰背包：背包的取舍交给 {@link #clearPlayerState(Player)} 按配置决定，
+     * 这里只负责把数值状态恢复成“干净”的样子，避免赢的人顶着 1 滴血、身上着火、
+     * 中毒状态回大厅。</p>
+     */
+    private void resetWinnerState(Player player) {
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+        var maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
+        double full = maxHealth == null ? 20.0 : maxHealth.getValue();
+        // 血量至少要留 1：某些属性插件把 maxHealth 临时压到 0 时 setHealth(0) 会直接弄死玩家
+        player.setHealth(Math.max(1.0, full));
+        player.setFoodLevel(20);
+        player.setSaturation(20.0F);
+        player.setExhaustion(0F);
+        player.setFireTicks(0);
+        player.setFallDistance(0F);
+        player.setRemainingAir(player.getMaximumAir());
+        for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
+            player.removePotionEffect(effect.getType());
+        }
+        player.updateInventory();
+    }
+
     /** 淘汰一名游戏内玩家：清背包、清效果、移出队伍、送回大厅并广播。 */
     public void eliminate(Player player, String messageKey, boolean broadcast) {
         eliminate(player, messageKey, broadcast, false);
@@ -1505,6 +1533,8 @@ public final class GameEngine {
                 points.save();
                 alerts.broadcast("win", Map.of("player", winner.getName()));
                 eliminate(winner, null, false);
+                // 淘汰流程负责传送与清背包；胜者的血量/饥饿/药水状态在这里单独复原
+                resetWinnerState(winner);
                 endGame();
             } else if (alive.isEmpty()) {
                 ended = true;
