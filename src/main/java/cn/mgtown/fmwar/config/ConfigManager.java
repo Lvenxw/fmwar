@@ -169,6 +169,22 @@ public final class ConfigManager {
 
         Settings.Duel duel = parseDuel(yaml, defaultWorld);
 
+        // 钓竿整组收进 FishingRod record：Start 只多一个字段，
+        // 之后钓竿内部加项（例如新的显示属性）都不必再改 Start 的签名
+        Settings.FishingRod fishingRod = new Settings.FishingRod(
+                yaml.getBoolean("start.fishing-rod.enabled", true),
+                yaml.getString("start.fishing-rod.material", "FISHING_ROD"),
+                lootParser.parseEnchantments(
+                        yaml.getStringList("start.fishing-rod.enchantments"),
+                        "start.fishing-rod.enchantments"),
+                // name 缺失 / 空串都归一为 ""，applyDisplay 用 isBlank 判空
+                yaml.getString("start.fishing-rod.name", ""),
+                yaml.getBoolean("start.fishing-rod.unbreakable", false),
+                yaml.getBoolean("start.fishing-rod.hide-unbreakable", false),
+                // 显式拷贝成不可变列表：record 的 List 字段若直接指向 YAML 内部结构，
+                // 后续 reload 时可能与旧快照共享同一份底层数组
+                List.copyOf(yaml.getStringList("start.fishing-rod.lore")));
+
         Settings.Start start = new Settings.Start(
                 yaml.getBoolean("start.clear-inventory", true),
                 yaml.getBoolean("start.clear-effects", true),
@@ -178,11 +194,7 @@ public final class ConfigManager {
                 yaml.getLong("start.resistance.duration-ticks", 100),
                 (int) yaml.getLong("start.resistance.amplifier", 4),
                 yaml.getBoolean("start.heal", true),
-                yaml.getBoolean("start.fishing-rod.enabled", true),
-                yaml.getString("start.fishing-rod.material", "FISHING_ROD"),
-                lootParser.parseEnchantments(
-                        yaml.getStringList("start.fishing-rod.enchantments"),
-                        "start.fishing-rod.enchantments"));
+                fishingRod);
 
         Settings.Emerald emerald = new Settings.Emerald(
                 (int) yaml.getLong("emerald.amount", 1));
@@ -232,7 +244,8 @@ public final class ConfigManager {
         Map<String, String> messages = readMessages(yaml);
         boolean actionbar = Boolean.parseBoolean(messages.getOrDefault("actionbar", "true"));
 
-        List<String> shopIds = new ArrayList<>();        for (String id : yaml.getStringList("extra-shops.ids")) {
+        List<String> shopIds = new ArrayList<>();
+        for (String id : yaml.getStringList("extra-shops.ids")) {
             if (id != null && !id.isBlank()) {
                 shopIds.add(id.trim());
             }
@@ -606,7 +619,8 @@ public final class ConfigManager {
         }
         if (parsed.timing().prepareClicks() <= 0) {
             problems.add(new Spec.Problem("timing.prepare-clicks", "必须为正整数"));
-        }        if (parsed.timing().gameDurationSeconds() <= 0) {
+        }
+        if (parsed.timing().gameDurationSeconds() <= 0) {
             problems.add(new Spec.Problem("timing.game-duration", "必须为正整数"));
         }
         if (parsed.extraShopsEnabled() && parsed.extraShopIds().isEmpty()) {

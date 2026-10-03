@@ -498,6 +498,9 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
      * <p>自定义附魔（数据包或附魔插件提供）无法在编译期验证；未注册的键在开局时
      * 只会被跳过并写 WARNING，因此提前在这里报出来，避免"箱子开出来是空的"这类现象
      * 到游戏中才发现。</p>
+     *
+     * <p>钓竿的附魔键与奖励箱的附魔键走同一套注册表查询：两者都可能是自定义附魔，
+     * 也都会在缺失时被静默跳过，所以合并成一张集合统一核对。</p>
      */
     private void diagnoseLootKeys(CommandSender sender) {
         Set<String> configured = new LinkedHashSet<>();
@@ -506,7 +509,8 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
                 configured.addAll(cn.mgtown.fmwar.config.LootParser.rawLootEnchantmentKeys(raw));
             }
         }
-        configured.addAll(config.settings().start().rodEnchantments().keySet());
+        // 钓竿配置已收进 FishingRod record，附魔表从 fishingRod().enchantments() 取
+        configured.addAll(config.settings().start().fishingRod().enchantments().keySet());
         if (configured.isEmpty()) {
             return;
         }

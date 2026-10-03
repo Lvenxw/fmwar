@@ -187,22 +187,42 @@ public record Settings(
     }
 
     /**
-     * 开局设置。
+     * 开局发放的钓竿配置。
      *
-     * <p>刻意**不提供背包备份开关**：备份只存在于内存里，崩服会连同备份一起丢失，
-     * 反而让玩家物品更不安全。需要保护玩家物品应当用专门的背包备份插件。</p>
+     * <p>收成一个 record 而不是在 {@code Start} 上摊开十个字段：钓竿的每一项
+     * （材质、附魔、名称、Lore、不可破坏）都属于同一件物品，摊开之后
+     * {@code Start} 会同时装着“清背包”“抗性”“钓竿”三组互不相干的配置，
+     * 加一项就要改一次构造器。收成 record 之后 {@code Start} 只多一个字段，
+     * 钓竿内部怎么加项都不影响调用方。</p>
+     *
+     * <p>所有字段都不可变：{@code name} 缺失与空串统一归一为 {@code ""}，
+     * {@code lore} 缺失归一为空列表——这样调用方判空时不用区分“没配”和“配了空”。</p>
      */
-    public record Start(boolean clearInventory,
-                        boolean clearEffects,
-                        boolean blockSneak,
-                        boolean lootBooksOnly,
-                        boolean resistanceEnabled,
-                        long resistanceDurationTicks,
-                        int resistanceAmplifier,
-                        boolean heal,
-                        boolean rodEnabled,
-                        String rodMaterial,
-                        Map<String, Integer> rodEnchantments) {
+    public record FishingRod(
+            boolean enabled,
+            String material,
+            Map<String, Integer> enchantments,
+            String name,
+            boolean unbreakable,
+            boolean hideUnbreakable,
+            List<String> lore) {
+
+        /** 材质可用且未禁用时才发竿；材质名写错时当作“不发”，由 buildRod 记日志。 */
+        public boolean usable() {
+            return enabled && material != null && !material.isBlank();
+        }
+    }
+
+    public record Start(
+            boolean clearInventory,
+            boolean clearEffects,
+            boolean blockSneak,
+            boolean lootBooksOnly,
+            boolean resistanceEnabled,
+            long resistanceDurationTicks,
+            int resistanceAmplifier,
+            boolean heal,
+            FishingRod fishingRod) {
     }
 
     public record Emerald(int amount) {

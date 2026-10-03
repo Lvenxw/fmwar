@@ -200,6 +200,15 @@ start:
       - 'minecraft:lure=255'
       - 'minecraft:luck_of_the_sea=255'
       - 'minecraft:magic_detection=5'
+    # 名称与 Lore 使用 MiniMessage 格式。
+    # 标签参考：<gold> <yellow> <gray> <dark_gray> <red> <aqua> <bold> <italic>
+    # 十六进制：<#FFAA00>金色</#FFAA00>
+    name: '<gold>附魔战争钓竿</gold>'
+    unbreakable: true
+    hide-unbreakable: false
+    lore:
+      - '<gray>右键抛出浮标，开阔水域钓上来的都是附魔书</gray>'
+      - '<dark_gray>—— 附魔战争</dark_gray>'
 
 # ===========================================================================
 # 游戏中每 interval 秒发放绿宝石

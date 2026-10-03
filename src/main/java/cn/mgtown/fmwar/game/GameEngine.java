@@ -10,6 +10,7 @@ import cn.mgtown.fmwar.service.TeamService;
 import cn.mgtown.fmwar.util.TimeUtil;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -19,6 +20,7 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -68,6 +70,14 @@ public final class GameEngine {
      * <p>清场时必须排除这些实体：它们是场地里的常驻设施，不属于“对局残留物”。</p>
      */
     private static final String ANVIL_TAG = "customanvil";
+
+    /**
+     * MiniMessage 解析器。
+     *
+     * <p>它是 Adventure 自带的实现，{@code MiniMessage.miniMessage()} 返回的单例内部
+     * 无状态、线程安全，静态持有即可，不必每次解析都新建。</p>
+     */
+    private static final MiniMessage MINI = MiniMessage.miniMessage();
 
     private final FMWar plugin;
     private final ConfigService config;
@@ -896,40 +906,113 @@ public final class GameEngine {
             player.setFoodLevel(20);
             player.setSaturation(20.0F);
         }
-        if (settings.start().rodEnabled()) {
-            ItemStack rod = buildRod(settings);
-            if (rod != null) {
-                player.getInventory().addItem(rod);
+        Settings.FishingRod rod = settings.start().fishingRod();
+        if (rod.usable()) {
+            ItemStack item = buildRod(rod);
+            if (item != null) {
+                player.getInventory().addItem(item);
             }
         }
         player.updateInventory();
     }
 
-    private ItemStack buildRod(Settings settings) {
-        Material material = Material.matchMaterial(
-                String.valueOf(settings.start().rodMaterial()).toUpperCase(Locale.ROOT));
+    /** 按配置构造钓竿；材质无法识别时返回 null（调用方跳过发放）。 */
+    private ItemStack buildRod(Settings.FishingRod rod) {
+        Material material = Material.matchMaterial(rod.material().toUpperCase(Locale.ROOT));
         if (material == null) {
-            plugin.getLogger().warning("start.fishing-rod.material 无法识别: " + settings.start().rodMaterial());
+            plugin.getLogger().warning("start.fishing-rod.material 无法识别: " + rod.material());
             return null;
         }
-        ItemStack rod = new ItemStack(material);
-        for (Map.Entry<String, Integer> entry : settings.start().rodEnchantments().entrySet()) {
-            String keyText = entry.getKey();
-            String normalized = keyText.contains(":") ? keyText : "minecraft:" + keyText;
-            NamespacedKey key;
-            try {
-                key = NamespacedKey.fromString(normalized.toLowerCase(Locale.ROOT));
-            } catch (RuntimeException exception) {
-                key = null;
-            }
-            Enchantment enchantment = key == null ? null : Registry.ENCHANTMENT.get(key);
+        ItemStack stack = new ItemStack(material);
+
+        // 附魔与显示属性都写在同一个 ItemMeta 上，最后一次 setItemMeta 写回。
+        ItemMeta meta = stack.getItemMeta();
+        if (meta == null) {
+            return stack;
+        }
+
+        for (Map.Entry<String, Integer> entry : rod.enchantments().entrySet()) {
+            Enchantment enchantment = resolveEnchantment(entry.getKey());
             if (enchantment == null) {
-                plugin.getLogger().warning("钓竿附魔不存在，已跳过: " + keyText);
                 continue;
             }
-            rod.addUnsafeEnchantment(enchantment, entry.getValue());
+            // 第三个参数 true = 忽略原版等级上限，等价于原来的 addUnsafeEnchantment
+            meta.addEnchant(enchantment, entry.getValue(), true);
         }
-        return rod;
+
+        applyDisplay(meta, rod);
+
+        stack.setItemMeta(meta);
+        return stack;
+    }
+
+    /** 解析附魔键；不认识的键记一条日志并返回 null。 */
+    private Enchantment resolveEnchantment(String keyText) {
+        String normalized = keyText.contains(":") ? keyText : "minecraft:" + keyText;
+        NamespacedKey key;
+        try {
+            key = NamespacedKey.fromString(normalized.toLowerCase(Locale.ROOT));
+        } catch (RuntimeException exception) {
+            key = null;
+        }
+        Enchantment enchantment = key == null ? null : Registry.ENCHANTMENT.get(key);
+        if (enchantment == null) {
+            plugin.getLogger().warning("钓竿附魔不存在，已跳过: " + keyText);
+        }
+        return enchantment;
+    }
+
+    /**
+     * 应用“不可破坏 / 自定义名称 / Lore”，全部走 Adventure 组件。
+     *
+     * <p>名称与每一行 Lore 都显式关掉斜体：Paper 在渲染 {@code ItemMeta} 的自定义
+     * 名称与 Lore 时，会给没有显式设置该装饰的组件补上 {@code ITALIC}，不关掉的话
+     * 文字会全部歪着显示。MiniMessage 自己不会补斜体，补的是 Paper 的渲染层，
+     * 所以这里必须显式设置，不能依赖“标签里没写 italic 就不斜”。</p>
+     */
+    private void applyDisplay(ItemMeta meta, Settings.FishingRod rod) {
+        if (rod.unbreakable()) {
+            meta.setUnbreakable(true);
+            if (rod.hideUnbreakable()) {
+                meta.addItemFlags(ItemFlag.HIDE_UNBREAKABLE);
+            }
+        }
+
+        String name = rod.name();
+        if (name != null && !name.isBlank()) {
+            meta.displayName(parseMini(name));
+        }
+
+        List<String> loreLines = rod.lore();
+        if (loreLines != null && !loreLines.isEmpty()) {
+            List<Component> lore = new ArrayList<>(loreLines.size());
+            for (String line : loreLines) {
+                lore.add(parseMini(line));
+            }
+            meta.lore(lore);
+        }
+
+        // 隐藏原版的附魔说明：钓竿挂着 255 级附魔时，不隐藏会在 Lore 里刷出
+        // 一大段原版格式的附魔列表，把自己写的 Lore 挤到很下面
+        meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
+    }
+
+    /**
+     * 解析 MiniMessage 文本为聊天组件，并关掉斜体。
+     *
+     * <p>解析失败时退回纯文本：标签写错（如 {@code <glod>}）在 MiniMessage 里会抛
+     * {@code ParsingException}，不能让一条文案把整个开局流程打断。退回纯文本时
+     * 同样要关掉斜体，否则文案会以斜体显示，反而比标签写错更难排查。</p>
+     */
+    private Component parseMini(String text) {
+        Component component;
+        try {
+            component = MINI.deserialize(text);
+        } catch (RuntimeException exception) {
+            plugin.getLogger().warning("物品文案解析失败，已按纯文本处理: " + text);
+            component = Component.text(text);
+        }
+        return component.decoration(TextDecoration.ITALIC, false);
     }
 
     // ------------------------------------------------------------------
