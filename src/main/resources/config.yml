@@ -241,13 +241,12 @@ chests:
     - - 'MACE:union=1'
       - 'NETHERITE_HOE:union=1'
     - - 'TRIDENT:daedalus=1,loyalty=3'
-    - - 'TRIDENT:faith=1,lunge=5'
     - - 'CROSSBOW:fusion_strike=1'
     - - 'BOW:eternal=1'
       - 'TIPPED_ARROW:potion=instant_damage;amplifier=1'
     - - 'NETHERITE_HELMET:evil_frenzy=1'
       - 'FISHING_ROD:magnetic_link=1,beach_boy=2'
-    - - 'NETHERITE_CHESTPLATE:fortitude=1'
+    - - 'NETHERITE_CHESTPLATE:fortitude=3'
 
 # ===========================================================================
 # ExtraShop 集成：对局开始时 spawn、结束时 despawn 的商店 id
