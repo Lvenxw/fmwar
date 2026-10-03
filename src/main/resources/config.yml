@@ -207,8 +207,7 @@ start:
     unbreakable: true
     hide-unbreakable: false
     lore:
-      - '<gray>右键抛出浮标，开阔水域钓上来的都是附魔书</gray>'
-      - '<dark_gray>—— 附魔战争</dark_gray>'
+      - '<gray>开阔水域钓上来的都是附魔书</gray>'
 
 # ===========================================================================
 # 游戏中每 interval 秒发放绿宝石

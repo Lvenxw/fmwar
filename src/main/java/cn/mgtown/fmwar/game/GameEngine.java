@@ -991,10 +991,6 @@ public final class GameEngine {
             }
             meta.lore(lore);
         }
-
-        // 隐藏原版的附魔说明：钓竿挂着 255 级附魔时，不隐藏会在 Lore 里刷出
-        // 一大段原版格式的附魔列表，把自己写的 Lore 挤到很下面
-        meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
     }
 
     /**
