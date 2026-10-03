@@ -291,6 +291,7 @@ scoreboard:
   time-seconds: true
   time-line: '&e剩余时间 &f{time}'
   alive-line: '&e存活人数 &f{alive}'
+  prep-line: "&e准备人数 &f{count}"
   # 积分榜：使用服务器上名为 <main> 的记分板（默认 fmjfb）
   points-enabled: true
   points-main: fmjfb

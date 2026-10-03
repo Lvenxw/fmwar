@@ -330,6 +330,8 @@ public final class GameEngine {
                 if (prepRoster.isEmpty() && prepareClicks != 0) {
                     prepareClicks = 0;
                 }
+                // 准备房右侧常驻显示“准备人数”（需求：准备房显示右侧准备人数）
+                updatePrepRoomDisplay();
             }
             case PREPARING -> tickPreparing(now);
             case RUNNING -> tickRunning(now);
@@ -339,6 +341,8 @@ public final class GameEngine {
 
     private void tickPreparing(long now) {
         syncPrepRoster();
+        // 倒计时期间也要刷新准备人数（有人进/出准备房时右侧数字跟着变）
+        updatePrepRoomDisplay();
         if (timer != null && timer.expired(now)) {
             debug("倒计时归零，开始对局（已入队 " + queuedInRoom() + " 人）");
             beginGame();
@@ -599,6 +603,22 @@ public final class GameEngine {
         }
     }
 
+    /**
+     * 准备房右侧常驻显示“准备人数”。
+     *
+     * <p>挂在同一块 {@code fm} 侧栏里（标题仍是 {@code scoreboard.title()}，
+     * 默认“附魔战争”），与对局中的“剩余时间/存活人数”共享同一块记分板，不另开新栏。</p>
+     *
+     * <p>房间空了（队列为空）就隐藏这一行，避免上一局的数字残留。</p>
+     */
+    private void updatePrepRoomDisplay() {
+        if (queue.isEmpty()) {
+            scoreboard.hidePrepRoom();
+            return;
+        }
+        scoreboard.showPrepRoom(config.settings(), queue.size());
+    }
+
     /** 准备房间内**已入队**的玩家数量（需求里的“准备房间范围满足至少两名玩家”）。 */
     private int queuedInRoom() {
         int count = 0;
@@ -838,6 +858,9 @@ public final class GameEngine {
     private void beginGame() {
         Settings settings = config.settings();
         scoreboard.hideCountdown();
+        // 准备阶段结束：把“准备人数”从同一块侧栏里收起，
+        // 让 update() 写入的“剩余时间/存活人数”占据这块侧栏
+        scoreboard.hidePrepRoom();
         // 领地权限不在这里常驻打开：开局分散、传决斗圈、观战进场各自走 teleport()，
         // 由它在每次传送期间临时放行、传送完成立刻恢复
         phase = GamePhase.RUNNING;

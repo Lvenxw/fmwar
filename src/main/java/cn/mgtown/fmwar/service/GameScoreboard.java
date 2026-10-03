@@ -1,6 +1,7 @@
 package cn.mgtown.fmwar.service;
 
 import cn.mgtown.fmwar.config.Settings;
+import io.papermc.paper.scoreboard.numbers.NumberFormat;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -10,19 +11,23 @@ import org.bukkit.scoreboard.DisplaySlot;
 import org.bukkit.scoreboard.Objective;
 import org.bukkit.scoreboard.Score;
 import org.bukkit.scoreboard.Scoreboard;
+import org.bukkit.scoreboard.Team;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
 /**
  * 记分板：
  * <ul>
- *   <li>{@code fm} —— 剩余时间 + 存活人数，挂在玩家自己可见的独立计分板上
- *       （因此“仅队伍 fm / fmgz 可见”是结构性成立的）；</li>
+ *   <li>{@code fm} —— 同一块侧栏（标题 {@code scoreboard.title()}，默认“附魔战争”），
+ *       按阶段显示不同内容：
+ *       <ul>
+ *         <li>准备房阶段：{@code prep-line} 一行，形如 {@code 准备人数 3}（纯文本行）；</li>
+ *         <li>对局阶段：{@code 剩余时间 / 存活人数} 两行，数字在记分值上。</li>
+ *       </ul>
+ *   </li>
  *   <li>{@code fmjfb} —— 附魔战争积分榜，注册在**服务器主计分板**上，
  *       但只在游戏期间显示给游戏内玩家。</li>
  * </ul>
@@ -33,6 +38,25 @@ import java.util.UUID;
 public final class GameScoreboard {
 
     private static final String OBJECTIVE = "fm";
+
+    /**
+     * “准备人数”那一行的固定 entry。
+     *
+     * <p>这一行是**纯文本行**：数字通过 {@code prep-line} 的 {@code {count}} 占位符
+     * 嵌进文本里，而不是写在记分值上。要让右侧不出现那个无意义的分数值（0），
+     * 需要两个条件：</p>
+     * <ol>
+     *   <li>entry 用一个固定、不可见的字符串，文本改由 {@link Team#prefix(Component)} 承载；</li>
+     *   <li>该 entry 的分数通过 {@link NumberFormat#blank()} 隐藏。</li>
+     * </ol>
+     *
+     * <p>entry 里用 {@code §} 颜色码拼出“看得见但看不见”的字符：
+     * {@code §0}（黑）与 {@code §r}（重置）连写，客户端会把它渲染成空白。</p>
+     */
+    private static final String PREP_ROOM_ENTRY = "\u00A70\u00A7r";
+
+    /** 承载准备人数文本的 Team 名（固定，避免重复注册）。 */
+    private static final String PREP_ROOM_TEAM = "fmwar_prep";
 
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
 
@@ -210,12 +234,74 @@ public final class GameScoreboard {
         if (objective == null) {
             return;
         }
+        // 对局开始：准备人数那一行让位给这两行
+        hidePrepRoom();
         objective.displayName(LEGACY.deserialize(nullToEmpty(settings.scoreboard().title())));
         Settings.Scoreboard config = settings.scoreboard();
         // 条目名是纯文本，不会自动转换 & 颜色码，必须显式渲染成 Component，
         // 否则侧栏会直接显示 “&e剩余时间” 这种原始代码
         setScoreName(objective, label(config.timeLine(), "剩余时间"), seconds);
         setScoreName(objective, label(config.aliveLine(), "存活人数"), alive);
+    }
+
+    /**
+     * 在同一块 {@code fm} 侧栏里显示/刷新“准备人数”一行。
+     *
+     * <p><b>这是纯文本行</b>：{@code prep-line} 里的 {@code {count}} 会被替换成实际
+     * 人数，作为整行的显示文本。为了让右侧不出现分数值，文本通过
+     * {@link Team#prefix(Component)} 承载，entry 用固定不可见字符串，
+     * 并用 {@link NumberFormat#blank()} 隐藏分数值。</p>
+     *
+     * @param settings 记分板配置；为 null 时使用内置默认文案
+     * @param count    要显示的人数
+     */
+    public void showPrepRoom(Settings settings, int count) {
+        Scoreboard scoreboard = teams.scoreboard();
+        Objective objective = scoreboard.getObjective(OBJECTIVE);
+        if (objective == null) {
+            return;
+        }
+        String template = settings == null ? null : settings.scoreboard().prepLine();
+        String text = renderPrepLine(template, count);
+
+        Team team = scoreboard.getTeam(PREP_ROOM_TEAM);
+        if (team == null) {
+            team = scoreboard.registerNewTeam(PREP_ROOM_TEAM);
+            team.addEntry(PREP_ROOM_ENTRY);
+        } else if (!team.hasEntry(PREP_ROOM_ENTRY)) {
+            team.addEntry(PREP_ROOM_ENTRY);
+        }
+        // 整行文本放在前缀里；suffix 留空
+        team.prefix(LEGACY.deserialize(text));
+        team.suffix(Component.empty());
+
+        // 让该 entry 有一个分数，但把分数显示隐藏掉（否则右侧会出现 0）
+        Score score = objective.getScore(PREP_ROOM_ENTRY);
+        score.setScore(0);
+        score.numberFormat(NumberFormat.blank());
+    }
+
+    /** 收起“准备人数”一行（离开准备阶段、房间没人时调用）。 */
+    public void hidePrepRoom() {
+        Scoreboard scoreboard = teams.scoreboard();
+        Team team = scoreboard.getTeam(PREP_ROOM_TEAM);
+        if (team != null) {
+            team.unregister();
+        }
+        scoreboard.resetScores(PREP_ROOM_ENTRY);
+    }
+
+    /**
+     * 渲染 {@code prep-line}：把 {@code {count}} 替换成实际人数。
+     *
+     * <p>与 {@link #label} 不同，这里**不裁占位符**——纯文本行就是要让数字出现在
+     * 整行文本里。模板为空时退回默认文案 {@code &e准备人数 &f{count}}。</p>
+     */
+    private String renderPrepLine(String template, int count) {
+        String text = (template == null || template.isBlank())
+                ? "&e准备人数 &f{count}"
+                : template;
+        return text.replace("{count}", Integer.toString(count));
     }
 
     /**
@@ -256,6 +342,7 @@ public final class GameScoreboard {
     /** 把所有玩家的可见计分板还原，并注销本插件的目标（游戏结束/插件停用时调用）。 */
     public void detachAll() {
         hideCountdown();
+        hidePrepRoom();
         for (Player player : Bukkit.getOnlinePlayers()) {
             teams.applyScoreboard(player, false);
         }

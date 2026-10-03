@@ -256,6 +256,7 @@ public record Settings(
                              boolean timeSeconds,
                              String timeLine,
                              String aliveLine,
+                             String prepLine,
                              boolean pointsEnabled,
                              String pointsMain,
                              String pointsTitle,

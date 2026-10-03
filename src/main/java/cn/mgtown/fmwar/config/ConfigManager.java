@@ -232,6 +232,7 @@ public final class ConfigManager {
                 yaml.getBoolean("scoreboard.time-seconds", true),
                 yaml.getString("scoreboard.time-line", "&e剩余时间 &f{time}"),
                 yaml.getString("scoreboard.alive-line", "&e存活人数 &f{alive}"),
+                yaml.getString("scoreboard.prep-line", "&e准备人数 &f{count}"),
                 yaml.getBoolean("scoreboard.points-enabled", true),
                 yaml.getString("scoreboard.points-main", "fmjfb"),
                 yaml.getString("scoreboard.points-title", "&6附魔战争积分榜"),
