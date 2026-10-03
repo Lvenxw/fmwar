@@ -9,13 +9,15 @@ import org.bukkit.util.Vector;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 把玩家放到一个“最高可落脚点”，且排除水。
+ * 把玩家放到一个“最高可落脚点”，且排除水与细雪。
  *
  * <p>需求里两处传送都要求“传送位置为最高可落脚点，不包括水”：开局分散与决斗圈收缩。
  * 判定规则（围绕世界最高非空气方块向下找首个可站立面）：</p>
  * <ol>
  *   <li>目标方块必须是固体、不是液体，且上方两格可容纳玩家；</li>
  *   <li>若是水/岩浆（液体）则继续向下找；</li>
+ *   <li>落点所在格（玩家脚部）如果是细雪，该 x/z 直接作废——
+ *       细雪无碰撞体积，玩家会陷进去并持续受冻伤；</li>
  *   <li>找不到合格落脚点时返回 null，由调用方决定降级策略。</li>
  * </ol>
  */
@@ -75,7 +77,17 @@ public final class SafeLocation {
                     continue;
                 }
             } else if (!ground.getType().isSolid()) {
+                // 细雪、草、花等没有碰撞体积的方块都在这里被跳过
                 continue;
+            }
+            // 需求：禁止把落点放在细雪上。
+            // ground 本身不可能是细雪（细雪不是 solid，上一行已 continue），
+            // 但落点所在格（玩家脚部）可能是——细雪没有碰撞体积，
+            // isPassable() 会返回 true，只看它会把细雪当成空气放过去，
+            // 玩家一落地就陷进去并持续受冻伤。这里直接作废该 x/z，
+            // 让上层采样换点，而不是继续向下搜（继续向下会让玩家落到细雪下方）。
+            if (world.getBlockAt(blockX, y + 1, blockZ).getType() == Material.POWDER_SNOW) {
+                return null;
             }
             if (!ground.getRelative(0, 1, 0).isPassable() || !ground.getRelative(0, 2, 0).isPassable()) {
                 continue;
@@ -94,10 +106,20 @@ public final class SafeLocation {
      * 完全不看该列的地形。适用场景是“水面上方一格”这类无法靠“最高可落脚面”
      * 描述的位置——水面不是可站立方块，而悬挂的藤蔓/垂叶又会被误判为落脚面。</p>
      *
+     * <p>唯一会拒绝的情形是细雪：锁定高度模式不做地形搜索，一旦脚部那一格
+     * 恰好铺着细雪，玩家就会陷进去。这里直接返回 null，让调用方走兜底点，
+     * 而不是把人塞进细雪里。</p>
+     *
      * @param y 落点的脚部高度（即玩家站在 y 这一格）
      */
     public static Location exact(World world, double x, double y, double z) {
         if (world == null) {
+            return null;
+        }
+        int blockX = (int) Math.floor(x);
+        int blockY = (int) Math.floor(y);
+        int blockZ = (int) Math.floor(z);
+        if (world.getBlockAt(blockX, blockY, blockZ).getType() == Material.POWDER_SNOW) {
             return null;
         }
         Location location = new Location(world,
