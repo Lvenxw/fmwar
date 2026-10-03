@@ -55,9 +55,9 @@ import org.bukkit.persistence.PersistentDataType;
 /**
  * 对局引擎：唯一的状态机 + 唯一的 20tick 主循环。
  *
- * <p>整份规格的时序都挂在同一个时钟上（准备倒计时、900s 对局倒计时、剩 60s 传决斗圈、
- * 每 30s 发绿宝石、归零后每秒扣血），因此这里只允许存在一个循环，按阶段分派，
- * 避免多个定时器互相竞态。</p>
+ * <p>整份规格的时序都挂在同一个时钟上（准备倒计时、game-duration 对局倒计时、
+ * 归零后传送决赛圈并把计时重置为 duel-duration、再归零后每秒扣血），
+ * 因此这里只允许存在一个循环，按阶段分派，避免多个定时器互相竞态。</p>
  */
 public final class GameEngine {
 
@@ -109,8 +109,8 @@ public final class GameEngine {
     private long lastOvertimeSecond = -1L;
     /** 上次发放绿宝石时的对局已进行秒数。 */
     private long lastEmeraldSecond = 0L;
-    /** 上一 tick 的剩余时间，用于卡顿时的决斗圈传送闸门。 */
-    private long lastRemainingTicks = Long.MAX_VALUE;
+    /** 上次展示“下一颗绿宝石剩余秒数”的缓存，避免每 tick 刷动作栏。 */
+    private long lastEmeraldCountdownShown = -1L;
     /** 是否已经执行过决斗圈传送。 */
     private boolean duelTeleported;
     /** 本局生成的奖励箱方块坐标（结束时清理）。 */
@@ -129,6 +129,17 @@ public final class GameEngine {
      * 判成“离开游戏”，直接以“无人生还”收场。2 秒足够任何一次本地传送落地。</p>
      */
     private static final long SETTLE_TICKS = 40L;
+
+    /**
+     * 观战者传送后的落地宽限（tick）。
+     *
+     * <p>观战者进入时，队伍标记是同步写好的，但传送是异步的。上一 tick 观战者还站在
+     * 大厅（在场地外），下一 tick 就会被 {@link #checkArenaPresence()} 判成“观战者离场”，
+     * 表现为“概率传送成功，失败时显示超出范围”。这里在传送前登记一个宽限窗口，
+     * 窗口内跳过离场判定，落地后自动放行。</p>
+     */
+    private final Map<UUID, Long> spectatorGrace = new HashMap<>();
+    private static final long SPECTATOR_GRACE_TICKS = 60L;
 
     /** 被本插件淘汰、等待主动重生的玩家：只有这些人的重生点会被改写为大厅。 */
     private final Set<UUID> pendingRespawn = new HashSet<>();
@@ -155,7 +166,7 @@ public final class GameEngine {
      * 调试日志开关（{@code /fmwar debug}）。
      *
      * <p>用 INFO 级别而不是 fine：这样不需要改服务端日志配置就能看到，
-     * 排查“按钮没反应/倒计时不启动”这类问题时可以直接开关。</p>
+     * 排查“按钮没反应/倒计时不启动”这类问题可以直接开关。</p>
      */
     private boolean debug;
 
@@ -191,9 +202,9 @@ public final class GameEngine {
         }
         long durationTicks = Math.max(1L, seconds) * 20L;
         timer = new Timer(GamePhase.RUNNING, Bukkit.getCurrentTick(), durationTicks);
-        // 重置与时间相关的游标，避免 60 秒闸门/加时扣血/绿宝石节奏被旧值干扰
-        lastRemainingTicks = Long.MAX_VALUE;
+        // 重置与时间相关的游标，避免决斗圈传送闸门/加时扣血/绿宝石节奏被旧值干扰
         lastEmeraldSecond = 0L;
+        lastEmeraldCountdownShown = -1L;
         lastOvertimeSecond = -1L;
         duelTeleported = false;
         if (config.settings().scoreboard().enabled()) {
@@ -409,8 +420,6 @@ public final class GameEngine {
         if (elapsedTicks >= SETTLE_TICKS) {
             checkArenaPresence();
         }
-        // 存活人数只算一次：本 tick 的记分板、周期复核都复用它，
-        // 否则同一 tick 会把名单遍历三遍
         int alive = aliveCount();
 
         // 1) 记分板：剩余时间与存活人数都写在“记分值”上（条目名是标签）
@@ -419,17 +428,24 @@ public final class GameEngine {
             scoreboard.update(settings, (int) seconds, alive);
         }
 
-        // 2) 剩 N 秒时把场内玩家集中到决斗圈
-        //    用“上一 tick 的剩余时间”做闸门：服务器卡顿导致一次跳过多个 tick 时，
-        //    只要跨过阈值就触发，但不会因为载入旧存档（剩余时间本来就很小）而立刻传送
-        long duelThresholdTicks = settings.timing().duelTeleportAtSeconds() * 20L;
-        boolean crossedThreshold = lastRemainingTicks > duelThresholdTicks && remainingTicks <= duelThresholdTicks;
-        boolean alreadyBelow = remainingTicks > 0 && remainingTicks <= duelThresholdTicks && lastRemainingTicks == Long.MAX_VALUE;
-        if (!duelTeleported && (crossedThreshold || alreadyBelow)) {
+        // 2) 剩余时间归零 → 把所有人传送到决赛圈，并把计时器重置为 duel-duration。
+        //    这里就是“剩余时间等效传送倒计时”的落点：对局倒计时不再有“剩 N 秒预告”，
+        //    直接走到 0 才触发传送，重置后新的一段决赛圈倒计时再归零才进入加时扣血。
+        //    时长取自 timing.duel-duration，与 config.yml 保持一致。
+        if (!duelTeleported && remainingTicks <= 0) {
             duelTeleported = true;
             teleportToDuel();
+            long duelDurationSeconds = Math.max(1L, settings.timing().duelDurationSeconds());
+            timer = new Timer(GamePhase.RUNNING, now, duelDurationSeconds * 20L);
+            lastOvertimeSecond = -1L;
+            lastEmeraldSecond = 0L;
+            lastEmeraldCountdownShown = -1L;
+            // 刷新本 tick 的游标：后面的绿宝石发放与兜底复核都基于新计时器
+            remainingTicks = timer.remainingTicks(now);
+            elapsedTicks = timer.elapsedTicks(now);
+            alive = aliveCount();
+            debug("对局倒计时归零，已传送至决斗圈；计时器重置为 " + duelDurationSeconds + " 秒");
         }
-        lastRemainingTicks = remainingTicks;
 
         // 3) 每 interval 秒发一颗绿宝石（用“距上次发放已经过多少秒”判定，丢 tick 也不会漏发）
         long elapsedSeconds = elapsedTicks / 20L;
@@ -438,7 +454,19 @@ public final class GameEngine {
             lastEmeraldSecond = elapsedSeconds;
             giveEmeralds();
         }
-        // 4) 倒计时归零：每秒扣血
+
+        // 3.1) 常驻显示“下一颗绿宝石剩余秒数”：只在秒数变化时刷，避免每 tick 刷屏。
+        //      决斗圈重置时 lastEmeraldSecond 归 0，这里会自动跟着重置为 interval。
+        long nextEmeraldIn = Math.max(0L, lastEmeraldSecond + interval - elapsedSeconds);
+        if (nextEmeraldIn != lastEmeraldCountdownShown) {
+            lastEmeraldCountdownShown = nextEmeraldIn;
+            String seconds = Long.toString(nextEmeraldIn);
+            for (Player player : onlineMembers()) {
+                alerts.sendActionBarTo(player, "emerald-countdown", Map.of("seconds", seconds));
+            }
+        }
+
+        // 4) 决赛圈倒计时归零：每秒扣血
         if (remainingTicks <= 0) {
             long overtime = (-remainingTicks) / 20L;
             if (overtime > lastOvertimeSecond) {
@@ -561,7 +589,7 @@ public final class GameEngine {
 
         if (timer != null) {
             // 倒计时在跑：本轮只做名单同步与进度清零，是否取消交给 tickPreparing 统一判定
-            //（取消需要“人数不足”或“有人新进入”这些条件，绝不能无条件取消——
+            //（取消需要“人数不足”或“有人新进入”这些条件，绝不能无条件取消——\
             //  那会让倒计时刚起步就被重置）
             return;
         }
@@ -815,7 +843,7 @@ public final class GameEngine {
         ended = false;
         lastOvertimeSecond = -1L;
         lastEmeraldSecond = 0L;
-        lastRemainingTicks = Long.MAX_VALUE;
+        lastEmeraldCountdownShown = -1L;
         lastCountdownSecond = -1L;
         prepareClicks = 0;
 
@@ -867,12 +895,15 @@ public final class GameEngine {
      * 换行符。整条作为一条聊天消息发出，客户端会按 {@code \n} 逐行渲染，因此这里
      * 不需要在代码里拆分。</p>
      *
-     * <p>{@code {interval}} 取自 {@code timing.emerald-interval}（当前配置为 30），
-     * 这样规则文案和实际发放节奏始终一致——服主改了间隔，这行会跟着变。</p>
+     * <p>{@code {interval}} 取自 {@code timing.emerald-interval}；
+     * {@code {duel}} 取自 {@code timing.duel-duration}，规则文案与两处实际节奏始终一致。</p>
      */
     private void broadcastGameRules() {
         long interval = Math.max(1L, config.settings().timing().emeraldIntervalSeconds());
-        alerts.broadcast("game-rule", Map.of("interval", Long.toString(interval)));
+        long duelSeconds = Math.max(1L, config.settings().timing().duelDurationSeconds());
+        alerts.broadcast("game-rule", Map.of(
+                "interval", Long.toString(interval),
+                "duel", Long.toString(duelSeconds)));
     }
 
     /**
@@ -1160,9 +1191,12 @@ public final class GameEngine {
         // 观战者一并送进本局选定的那个决斗圈，直接落在圈中心的安全位（fallback）：
         // 不参与落点采样——旁观模式没有碰撞体积，多人重叠没有影响，
         // 集中在中心反而能看清对决。决斗圈区域本就落在 arena 之内，
-        // 因此这里不会触发 checkArenaPresence 里的“观战者离场”。
+        // 因此这里不会触发 checkArenaPresence 里的“观战者离场”，
+        // 但仍登记宽限窗口，避免异步传送落地前的几 tick 被误判。
         int spectators = 0;
         for (Player spectator : onlineSpectators()) {
+            spectatorGrace.put(spectator.getUniqueId(),
+                    Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
             teleport(spectator, levelView(spectator, fallback));
             alerts.sendActionBarTo(spectator, "duel-teleport", Map.of());
             spectators++;
@@ -1406,7 +1440,17 @@ public final class GameEngine {
                 eliminate(player, "player-arena-exit", true);
             }
         }
+        long now = Bukkit.getCurrentTick();
         for (Player player : onlineSpectators()) {
+            // 观战者传送是异步的：落地前的几 tick 内玩家读到的仍是旧坐标，
+            // 宽限窗口内跳过离场判定，否则会“概率传送成功，失败时提示超出范围”。
+            Long grace = spectatorGrace.get(player.getUniqueId());
+            if (grace != null) {
+                if (now < grace) {
+                    continue;
+                }
+                spectatorGrace.remove(player.getUniqueId());
+            }
             if (!arena.contains(player.getLocation())) {
                 exitSpectator(player);
             }
@@ -1427,13 +1471,12 @@ public final class GameEngine {
             // 并被重复传送一次，提示与需求 106 的“离开了游戏”相冲突
             Long grace = recentEliminations.get(uuid);
             if (grace != null) {
-                if (Bukkit.getCurrentTick() < grace) {
+                if (now < grace) {
                     continue;
                 }
                 recentEliminations.remove(uuid);
             }
             // 冷却 + 目标在受保护区域内：即使某次传送被领地守卫取消，也不会形成每 tick 重传的循环
-            long now = Bukkit.getCurrentTick();
             Long until = outsiderCooldown.get(uuid);
             if (until != null && now < until) {
                 continue;
@@ -1496,6 +1539,7 @@ public final class GameEngine {
         clearPlayerState(player);
         teams.leaveAll(uuid);
         scoreboard.detach(player);
+        spectatorGrace.remove(uuid);
         recentEliminations.put(uuid, Bukkit.getCurrentTick() + ELIMINATION_GRACE_TICKS);
         if (deferredRespawn) {
             // 先登记再传送：PlayerRespawnEvent 触发时才知道“这是被本插件淘汰的人”
@@ -1572,6 +1616,7 @@ public final class GameEngine {
 
     /** 观战玩家离场：回大厅 + 生存模式 + 移出队伍。 */
     public void exitSpectator(Player player) {
+        spectatorGrace.remove(player.getUniqueId());
         teams.leaveAll(player.getUniqueId());
         scoreboard.detach(player);
         player.setGameMode(GameMode.SURVIVAL);
@@ -1594,6 +1639,11 @@ public final class GameEngine {
             alerts.sendTo(player, "spectator-already", Map.of());
             return false;
         }
+        // 传送是异步的：先把队伍标好，同时登记宽限窗口。宽限窗口在
+        // checkArenaPresence 里被消费，避免“人还在大厅、队伍已是 fmgz”的那几
+        // tick 被误判为“观战者离场”。
+        spectatorGrace.put(player.getUniqueId(),
+                Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
         teams.joinSpectatorTeam(player.getUniqueId());
         player.setGameMode(GameMode.SPECTATOR);
         scoreboard.attach(player, config.settings());
@@ -1620,12 +1670,14 @@ public final class GameEngine {
             }
             teams.leaveAll(uuid);
             scoreboard.detach(player);
+            spectatorGrace.remove(uuid);
             alerts.broadcast("quit", Map.of("player", player.getName()));
             if (phase == GamePhase.RUNNING && !ended) {
                 checkVictory();
             }
             retiredFromGame = true;
         } else if (teams.inSpectatorTeam(uuid)) {
+            spectatorGrace.remove(uuid);
             if (phase == GamePhase.RUNNING) {
                 // 需求 104：对局中掉线的观战者，上线后仍为观战
                 disconnectedSpectators.add(uuid);
@@ -1662,6 +1714,7 @@ public final class GameEngine {
         if (disconnectedSpectators.remove(uuid)) {
             pendingHall.remove(uuid);
             if (phase == GamePhase.RUNNING) {
+                spectatorGrace.put(uuid, Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
                 player.setGameMode(GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
@@ -1688,6 +1741,7 @@ public final class GameEngine {
         if (phase == GamePhase.RUNNING) {
             if (members.contains(uuid)) {
                 // 名单里仍有此人（例如跨 tick 的边界情况）：按观战处理，不再回到对局
+                spectatorGrace.put(uuid, Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
                 teams.joinSpectatorTeam(uuid);
                 player.setGameMode(GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
@@ -1695,6 +1749,7 @@ public final class GameEngine {
                 return;
             }
             if (teams.inSpectatorTeam(uuid)) {
+                spectatorGrace.put(uuid, Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
                 player.setGameMode(GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
@@ -1745,7 +1800,8 @@ public final class GameEngine {
     }
 
     /** 只剩一名玩家则胜利；一名不剩则无人生还。挂起 1 tick，避开死亡结算中的中间态。 */
-    private void checkVictory() {        if (phase != GamePhase.RUNNING || ended) {
+    private void checkVictory() {
+        if (phase != GamePhase.RUNNING || ended) {
             return;
         }
         Bukkit.getScheduler().runTask(plugin, () -> {
@@ -1900,13 +1956,14 @@ public final class GameEngine {
         recentEliminations.clear();
         pendingRespawn.clear();
         disconnectedSpectators.clear();
+        spectatorGrace.clear();
         lastDamager.clear();
         chests.clear();
         prepareClicks = 0;
         duelTeleported = false;
         lastOvertimeSecond = -1L;
         lastEmeraldSecond = 0L;
-        lastRemainingTicks = Long.MAX_VALUE;
+        lastEmeraldCountdownShown = -1L;
         lastCountdownSecond = -1L;
         timer = null;
         ended = false;
@@ -1924,12 +1981,6 @@ public final class GameEngine {
         return hall == null ? null : hall.toLocation();
     }
 
-    /**
-     * 清空场地范围内所有实体（不含玩家）。
-     *
-     * <p>需求 118：“清空游戏场地范围内所有实体（不包括玩家，此时玩家应全部离开场地范围）”。
-     * 只删自己放的奖励箱是不够的——掉落物、射出的箭、投掷物、载具都要一并清理。</p>
-     */
     /**
      * 清空场地范围内所有实体（不含玩家，也不含自定义铁砧）。
      *

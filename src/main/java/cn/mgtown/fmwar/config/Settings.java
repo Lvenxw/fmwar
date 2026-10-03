@@ -81,12 +81,14 @@ public record Settings(
         return messages.getOrDefault(key, key);
     }
 
-    public record Timing(long prepareClicks,
-                         long prepareCountdownSeconds,
-                         long gameDurationSeconds,
-                         long duelTeleportAtSeconds,
-                         long emeraldIntervalSeconds,
-                         double overtimeDamage) {
+    public record Timing(
+            long gameDurationSeconds,
+            long prepareCountdownSeconds,
+            long prepareClicks,
+            long duelDurationSeconds,      // 新增
+            long emeraldIntervalSeconds,
+            double overtimeDamage
+    ) {
     }
 
     /**

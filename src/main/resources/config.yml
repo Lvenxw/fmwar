@@ -105,10 +105,11 @@ timing:
   prepare-clicks: 7
   # 准备倒计时（准备按钮达成后开始）
   prepare-countdown: 10
-  # 对局总时长；倒计时归零后场地内玩家每秒扣血
+  # 对局倒计时（秒）。归零后把所有玩家传送到决赛圈，并把本段计时重置为 duel-duration
   game-duration: 480
-  # 剩余多少秒时把场内玩家传送到决斗圈
-  duel-teleport-at: 60
+  # 决赛圈阶段时长（秒）。game-duration 归零时用它重置计时器；
+  # 这一段的 30 秒归零后才开始每秒扣血
+  duel-duration: 30
   # 每多少秒发放一颗绿宝石
   emerald-interval: 30
   # 倒计时归零后的每秒扣血量
@@ -334,9 +335,11 @@ messages:
   # 整条广播时由聊天组件按行渲染。
   # 注意 |- 前后的缩进必须比 game-rule 深，且块内每一行都用同样缩进。
   game-rule: |-
+    <yellow>对局规则：
     &d - 在此处，铁砧附魔无需经验，并且除黄色和蓝色词条以外的冲突附魔均可共存，装备不再有词条上限，铁砧不会随机生成诅咒
     &d - 用钓竿快速获取附魔书
     &d - 每隔 &e{interval}s &d获得一个绿宝石，可在村民处交易
+    &d - 倒计时归零进入决赛圈，决赛圈持续 <white>{duel}s</white>，之后每秒扣血
     &d - 决出最后的一位赢家
   game-already-running: '{prefix}&c游戏已经开始，暂时无法加入'
   spectator-unavailable: '{prefix}&c当前没有进行中的对局，无法观战'

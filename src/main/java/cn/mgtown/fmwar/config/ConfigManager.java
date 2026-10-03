@@ -154,7 +154,7 @@ public final class ConfigManager {
                 yaml.getLong("timing.prepare-clicks", 7),
                 yaml.getLong("timing.prepare-countdown", 10),
                 yaml.getLong("timing.game-duration", 900),
-                yaml.getLong("timing.duel-teleport-at", 60),
+                yaml.getLong("timing.duel-duration", 60),
                 yaml.getLong("timing.emerald-interval", 30),
                 yaml.getDouble("timing.overtime-damage", 2.0));
 
