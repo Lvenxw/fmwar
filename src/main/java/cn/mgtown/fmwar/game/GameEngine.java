@@ -440,29 +440,33 @@ public final class GameEngine {
             lastOvertimeSecond = -1L;
             lastEmeraldSecond = 0L;
             lastEmeraldCountdownShown = -1L;
-            // 刷新本 tick 的游标：后面的绿宝石发放与兜底复核都基于新计时器
+            // 刷新本 tick 的游标：后面的兜底复核都基于新计时器
             remainingTicks = timer.remainingTicks(now);
             elapsedTicks = timer.elapsedTicks(now);
             alive = aliveCount();
             debug("对局倒计时归零，已传送至决斗圈；计时器重置为 " + duelDurationSeconds + " 秒");
         }
 
-        // 3) 每 interval 秒发一颗绿宝石（用“距上次发放已经过多少秒”判定，丢 tick 也不会漏发）
+        // 3) 每 interval 秒发一颗绿宝石（用“距上次发放已经过多少秒”判定，丢 tick 也不会漏发）。
+        //    决赛圈阶段不再发放绿宝石：duelTeleported 为 true 时整段跳过。
         long elapsedSeconds = elapsedTicks / 20L;
         long interval = Math.max(1L, settings.timing().emeraldIntervalSeconds());
-        if (elapsedSeconds >= lastEmeraldSecond + interval) {
+        if (!duelTeleported && elapsedSeconds >= lastEmeraldSecond + interval) {
             lastEmeraldSecond = elapsedSeconds;
             giveEmeralds();
         }
 
         // 3.1) 常驻显示“下一颗绿宝石剩余秒数”：只在秒数变化时刷，避免每 tick 刷屏。
-        //      决斗圈重置时 lastEmeraldSecond 归 0，这里会自动跟着重置为 interval。
-        long nextEmeraldIn = Math.max(0L, lastEmeraldSecond + interval - elapsedSeconds);
-        if (nextEmeraldIn != lastEmeraldCountdownShown) {
-            lastEmeraldCountdownShown = nextEmeraldIn;
-            String seconds = Long.toString(nextEmeraldIn);
-            for (Player player : onlineMembers()) {
-                alerts.sendActionBarTo(player, "emerald-countdown", Map.of("seconds", seconds));
+        //      决赛圈阶段不再显示：进入决赛圈那一刻已经由步骤 2 把游标重置为 -1，
+        //      这里再跳过写入，屏幕上会保留 teleportToDuel() 发出的“已传送至决赛圈”动作栏。
+        if (!duelTeleported) {
+            long nextEmeraldIn = Math.max(0L, lastEmeraldSecond + interval - elapsedSeconds);
+            if (nextEmeraldIn != lastEmeraldCountdownShown) {
+                lastEmeraldCountdownShown = nextEmeraldIn;
+                String seconds = Long.toString(nextEmeraldIn);
+                for (Player player : onlineMembers()) {
+                    alerts.sendActionBarTo(player, "emerald-countdown", Map.of("seconds", seconds));
+                }
             }
         }
 
