@@ -188,7 +188,7 @@ start:
   resistance:
     enabled: true
     duration-ticks: 3600
-    amplifier: 5
+    amplifier: 4
   # 回满血量与饱食度
   heal: true
   # 发放钓鱼竿
