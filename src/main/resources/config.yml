@@ -330,6 +330,8 @@ messages:
   prepare-countdown: '{prefix}&e游戏将在 &f{seconds} &e秒后开始'
   duel-teleport: '{prefix}&c决斗时间！'
   game-start: '{prefix}&a游戏开始！'
+  # 下一颗绿宝石发放倒计时（动作栏，常驻）
+  emerald-countdown: "<green>下一颗绿宝石：<yellow>{seconds}s"
   # 开局规则说明，紧跟 game-start 之后广播。
   # 用 |- 块标量保留换行：渲染出来是一个带 \n 的字符串，
   # 整条广播时由聊天组件按行渲染。
