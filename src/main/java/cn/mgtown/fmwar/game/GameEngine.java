@@ -161,6 +161,14 @@ public final class GameEngine {
     /** 本局是否已判定结束（结束后不再接受任何淘汰/胜利判定，避免同一局重复结算）。 */
     private boolean ended;
 
+    /**
+     * 上次记录玩家活动区块的 tick。
+     *
+     * <p>用绝对 tick 而非 elapsedTicks：后者会在决斗圈传送时被重置，
+     * 那样两次采样的间隔就不再稳定。</p>
+     */
+    private long lastTrackTick;
+
     /** 最近一次分散的结果摘要，写进开局日志（便于确认落点而不是“又传到场地传送点”）。 */
     private String lastDisperseReport = "未执行";
     /**
@@ -494,6 +502,15 @@ public final class GameEngine {
         //    自己完成播报，否则玩家只会看到一句“游戏结束”而不知道结果。
         if (elapsedTicks % 80L == 0L && alive < 2) {
             settleFromRoster();
+        }
+
+        // 6) 每秒记录一次玩家活动过的区块，供结算时精准清场。
+        //    场地矩形约 1260 个区块，而一局里玩家真正去过的只有几十个；
+        //    不记录就只能扫全量，既慢又会成批加载/卸载区块，把客户端卡出观感。
+        //    每秒一次足够：两次采样之间玩家挪不出一个区块。
+        if (now - lastTrackTick >= 20L) {
+            lastTrackTick = now;
+            cleaner.track();
         }
     }
 
@@ -878,6 +895,10 @@ public final class GameEngine {
         lastEmeraldCountdownShown = -1L;
         lastCountdownSecond = -1L;
         prepareClicks = 0;
+        // 新一局从空白追踪名单开始：否则会把上一局残留的区块也算进来，
+        // 结算时白扫一批
+        cleaner.resetTracking();
+        lastTrackTick = Bukkit.getCurrentTick();
 
         List<Player> participants = new ArrayList<>();
         for (UUID uuid : new ArrayList<>(queue)) {
@@ -1908,6 +1929,17 @@ public final class GameEngine {
         timer = new Timer(GamePhase.ENDING, Bukkit.getCurrentTick(), 1L);
     }
 
+    /**
+     * 结算：把所有人先送回大厅，再做清场。
+     *
+     * <p><b>顺序是硬性的，不能调换。</b>玩家的传送与状态复位必须<b>先于</b>任何批量工作完成：
+     * 清场要加载/遍历区块，一旦它排在前面，主线程被占住的这一两秒里回大厅的传送
+     * 根本发不出去，玩家看到的就是“对局结束了但人卡在场地里出不来”，客户端同时卡顿。
+     * 这正是此前把{@code clearArenaEntities()} 放在 {@code sendPendingHallToLobby()}
+     * 之前造成的现象。</p>
+     *
+     * <p>清场本身已被改成“只排一个后续任务”，因此这里的调用不会阻塞当前 tick。</p>
+     */
     private void finishGame() {
         Settings settings = config.settings();
         for (Player player : new ArrayList<>(onlineMembers())) {
@@ -1919,12 +1951,14 @@ public final class GameEngine {
             player.setGameMode(GameMode.SURVIVAL);
             teleport(player, settings.location("hall-spawn"));
         }
+        // --- 玩家侧收尾：以下必须在任何区块批量操作之前 ---
+        sendPendingHallToLobby();
+        scoreboard.detachAll();
+        resetRuntimeState();
+        // --- 环境侧收尾：可以慢慢做，不能挡住玩家 ---
         clearChests();
         clearArenaEntities();
         shops.despawnAll();
-        scoreboard.detachAll();
-        sendPendingHallToLobby();
-        resetRuntimeState();
         // 对局结束：积分写盘（一局里分数变动频繁，不必每次加分都落盘）
         points.save();
         alerts.broadcast("game-over", Map.of());
@@ -1944,14 +1978,15 @@ public final class GameEngine {
             player.setGameMode(GameMode.SURVIVAL);
             teleport(player, config.settings().location("hall-spawn"));
         }
+        // 与 finishGame 同一个原则：先把玩家送走，再做环境清理
+        sendPendingHallToLobby();
+        scoreboard.detachAll();
+        resetRuntimeState();
         clearChests();
         // 走“仅已加载区块”那条路：这条清理同时服务于 /fmwar stop 与插件停用，
         // 而停用时不能再调度异步加载区块的任务。远处未加载区块的残留留到下次结算处理。
         cleaner.startLoadedOnly();
         shops.despawnAll();
-        scoreboard.detachAll();
-        sendPendingHallToLobby();
-        resetRuntimeState();
     }
 
     /**
