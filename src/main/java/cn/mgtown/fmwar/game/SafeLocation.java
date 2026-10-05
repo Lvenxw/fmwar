@@ -74,7 +74,13 @@ public final class SafeLocation {
             if (ground.isLiquid()) {
                 // 水面：只有显式允许时才作为落点
                 if (!allowWater || !isWater(ground)) {
-                    continue;
+                    // **必须就此作废这一列，不能继续向下搜。**
+                    // 向下搜会穿过水面一路落到水底，于是落点变成“水下”——
+                    // 若水底是洞穴（场地里被水灌满的地下洞穴就是这样），
+                    // 玩家就会被直接丢进洞里，且四周是水、爬不出来。
+                    // 需求写明“不包括水”，因此正确做法是换一个采样点，
+                    // 而不是把玩家塞进水面以下。
+                    return null;
                 }
             } else if (!ground.getType().isSolid()) {
                 // 细雪、草、花等没有碰撞体积的方块都在这里被跳过
@@ -92,11 +98,46 @@ public final class SafeLocation {
             if (!ground.getRelative(0, 1, 0).isPassable() || !ground.getRelative(0, 2, 0).isPassable()) {
                 continue;
             }
+            // 候选落点已满足“上方两格可容纳玩家”。若调用方**没有**声明室内天花板，
+            // 还要确认它贴着该列地表——否则竖井口的干燥洞穴会把玩家一路接到洞底。
+            if (maxY <= 0 && !isNearSurface(world, blockX, y, blockZ)) {
+                return null;
+            }
             Location location = new Location(world, blockX + 0.5, y + 1.0, blockZ + 0.5);
             location.setDirection(new Vector(0, 0, 0));
             return location;
         }
         return null;
+    }
+
+    /**
+     * 无天花板模式下，落点允许比该列地表低多少格。
+     *
+     * <p>取值很小（2 格）是有意的：它只用来容忍屋顶台阶、矮墙这类**人工**落差，
+     * 而任何真实的地形落差（洞穴、竖井、深坑）都远超2 格。</p>
+     */
+    private static final int MAX_DEPTH_BELOW_SURFACE = 2;
+
+    /**
+     * 落点是否贴近该列的地表高度。
+     *
+     * <p><b>为什么需要这道闸门：</b>{@code getHighestBlockYAt} 返回该列最高的运动阻挡方块。
+     * 采样点正好落在地面洞穴的<b>竖井口</b>时，搜索会一路向下走进洞穴，遇到洞底一块
+     * solid 就返回——玩家被直接丢进地下。加上 {@link #find} 里对液体“作废而非下潜”的处理，
+     * 就正好复现「地下洞穴里全是水」：水面作废后，搜索继续向下找到洞底。</p>
+     *
+     * <p>要求落点不低于“该列地表高度 − {@value #MAX_DEPTH_BELOW_SURFACE}”之后，
+     * 保留的都是玩家看得见的正常位置（地面、屋顶、矮台阶），被拒绝的只有洞穴内部与竖井底部，
+     * 采样器会自然换到旁边的列。</p>
+     *
+     * <p><b>为什么只在“没有天花板”时生效：</b>室内场地（决斗圈 1 就有封顶玻璃，
+     * 天花板约 y=170、地面 y≈94）的合法落点按定义就远低于地表。对它套用同一标准
+     * 会把室内地面全部作废。因此以 {@code maxY > 0} 作为“调用方已声明室内天花板”的信号，
+     * 室内场地不做这项检查。</p>
+     */
+    private static boolean isNearSurface(World world, int blockX, int y, int blockZ) {
+        int surface = world.getHighestBlockYAt(blockX, blockZ);
+        return y >= surface - MAX_DEPTH_BELOW_SURFACE;
     }
 
     /**

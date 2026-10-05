@@ -26,6 +26,7 @@ public record Settings(
         Teams teams,
         Scoreboard scoreboard,
         Residence residence,
+        Cleanup cleanup,
         Map<String, String> messages,
         boolean actionbarMessages
 ) {
@@ -249,6 +250,24 @@ public record Settings(
      */
     public record Residence(boolean enabled, String flag,
                             List<String> prepRegions, List<String> arenaRegions) {
+    }
+
+    /**
+     * 场地清场策略。
+     *
+     * <p>{@code World#getEntities()} 只返回**已加载区块**里的实体，而场地通常横跨上千个区块，
+     * 因此结算时必须额外扫一遍未加载区块，否则会残留掉落物。这两个参数控制那次分批扫描。</p>
+     *
+     * @param enabled        是否扫描未加载区块。关掉后只剩已加载区块被清理（快，但会残留）
+     * @param chunksPerTick  每 tick 临时加载并清理多少个区块。调大更快但更卡，
+     *                       调小更平滑但收尾更久
+     */
+    public record Cleanup(boolean enabled, int chunksPerTick) {
+
+        /** 每 tick 处理的区块数下限，避免配成 0 或负数导致扫荡永不推进。 */
+        public int safeChunksPerTick() {
+            return Math.max(1, chunksPerTick);
+        }
     }
 
     public record Scoreboard(boolean enabled,

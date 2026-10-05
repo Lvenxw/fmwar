@@ -274,6 +274,9 @@ public final class ConfigManager {
                         yaml.getString("residence.flag", "move"),
                         yaml.getStringList("residence.prep-regions"),
                         yaml.getStringList("residence.arena-regions")),
+                new Settings.Cleanup(
+                        yaml.getBoolean("cleanup.enabled", true),
+                        (int) yaml.getLong("cleanup.chunks-per-tick", 4)),
                 Map.copyOf(messages),
                 actionbar);
     }

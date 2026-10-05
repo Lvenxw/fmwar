@@ -3,6 +3,7 @@ package cn.mgtown.fmwar.game;
 import cn.mgtown.FMWar;
 import cn.mgtown.fmwar.config.Settings;
 import cn.mgtown.fmwar.service.AlertService;
+import cn.mgtown.fmwar.service.ArenaCleaner;
 import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.GameScoreboard;
 import cn.mgtown.fmwar.service.ShopService;
@@ -49,8 +50,6 @@ import org.bukkit.Registry;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.block.Chest;
 import org.bukkit.enchantments.Enchantment;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 
 /**
  * 对局引擎：唯一的状态机 + 唯一的 20tick 主循环。
@@ -65,11 +64,13 @@ public final class GameEngine {
     private World world;
 
     /**
-     * 自定义铁砧（customanvil 插件）的记分板标签。
+     * 场地清场。
      *
-     * <p>清场时必须排除这些实体：它们是场地里的常驻设施，不属于“对局残留物”。</p>
+     * <p>刻意做成独立服务而不是留在引擎里：它有自己的生命周期（分批任务可能跨若干 tick），
+     * 也有自己关心的事（区块枚举、加载/卸载还原）。塞进 {@code GameEngine} 只会让
+     * 那个已经很大的类再多一块与玩法状态机无关的状态。</p>
      */
-    private static final String ANVIL_TAG = "customanvil";
+    private final ArenaCleaner cleaner;
 
     /**
      * MiniMessage 解析器。
@@ -186,6 +187,7 @@ public final class GameEngine {
         this.shops = shops;
         this.points = points;
         this.residence = residence;
+        this.cleaner = new ArenaCleaner(plugin, config);
     }
 
     /**
@@ -282,6 +284,9 @@ public final class GameEngine {
             tickTask.cancel();
             tickTask = null;
         }
+        // 分批清场任务必须先撤掉：停用过程中调度任务会抛异常，
+        // 回调里再访问区块同样不安全
+        cleaner.cancel();
         forceCleanup();
         // 强制复位领地权限：绝不能把“临时打开”的状态留在服务器上
         residence.reset();
@@ -1940,7 +1945,9 @@ public final class GameEngine {
             teleport(player, config.settings().location("hall-spawn"));
         }
         clearChests();
-        clearArenaEntities();
+        // 走“仅已加载区块”那条路：这条清理同时服务于 /fmwar stop 与插件停用，
+        // 而停用时不能再调度异步加载区块的任务。远处未加载区块的残留留到下次结算处理。
+        cleaner.startLoadedOnly();
         shops.despawnAll();
         scoreboard.detachAll();
         sendPendingHallToLobby();
@@ -2014,41 +2021,12 @@ public final class GameEngine {
      * <p>需求 118：“清空游戏场地范围内所有实体（不包括玩家，此时玩家应全部离开场地范围）”。
      * 只有奖励箱、掉落物、箭矢、载具等都要一并清理。</p>
      *
-     * <p><b>自定义铁砧（插件 customanvil）必须排除</b>：它是场地里的常驻设施，
-     * 属于玩家自己摆放的功能性实体，清掉会破坏场地布置。这里同时检查记分板标签与
-     * PersistentDataContainer 两种标记方式，覆盖它的 Interaction 与 BlockDisplay 实体。</p>
+     * <p><b>实现已移交给 {@link ArenaCleaner}</b>：{@code World#getEntities()} 只返回
+     * 已加载区块里的实体，而场地横跨上千个区块，单靠它会漏掉大量掉落物。
+     * 铁砧排除规则（记分板标签 / PDC）随之一起搬过去，两条清场路径共用同一套判定。</p>
      */
     private void clearArenaEntities() {
-        Region arena = config.settings().optionalRegion("arena");
-        if (arena == null) {
-            return;
-        }
-        World target = arena.bukkitWorld();
-        if (target == null) {
-            return;
-        }
-        // 先取快照再删除：直接在 getEntities() 的返回集合上移除会有并发修改问题
-        for (org.bukkit.entity.Entity entity : new ArrayList<>(target.getEntities())) {
-            if (entity instanceof Player) {
-                continue;
-            }
-            if (isCustomAnvilEntity(entity)) {
-                continue;
-            }
-            if (arena.contains(entity.getLocation())) {
-                entity.remove();
-            }
-        }
-    }
-
-    /** 判定实体是否属于 customanvil 插件的自定义铁砧（标签或 PDC 任一命中即算）。 */
-    private boolean isCustomAnvilEntity(org.bukkit.entity.Entity entity) {
-        if (entity.getScoreboardTags().contains(ANVIL_TAG)) {
-            return true;
-        }
-        PersistentDataContainer container = entity.getPersistentDataContainer();
-        return container.has(new NamespacedKey("customanvil", "anvil_entity"), PersistentDataType.BYTE)
-                || container.has(new NamespacedKey("customanvil", "anvil_partner"), PersistentDataType.STRING);
+        cleaner.start();
     }
 
     /** 强制中止（/fmwar stop）。 */
