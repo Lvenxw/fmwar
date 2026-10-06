@@ -210,7 +210,7 @@ start:
     unbreakable: true
     hide-unbreakable: false
     lore:
-      - '<light_purple>钓鱼佬永不空军，只可能背包不够</light_purple>'
+      - '<light_purple>水源即书源，浮漂即神谕</light_purple>'
 
 # ===========================================================================
 # 游戏中每 interval 秒发放绿宝石
