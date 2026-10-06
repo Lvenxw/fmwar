@@ -19,6 +19,7 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.Container;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemFlag;
@@ -1348,6 +1349,13 @@ public final class GameEngine {
             }
             Inventory inventory = chest.getBlockInventory();
 
+            // 先清空再写入，而不是只覆盖前 N 格。
+            // loot-groups 的一行通常只有 1~2 件，箱子却有 27 格：只靠 setItem 覆盖，
+            // 上一局没被玩家取走的物品会原样留在后面的槽位里，看起来就是"箱子里还有
+            // 上一局的物品"。同样地，只要上一局的清箱因任何原因没生效
+            // （区块未加载、方块被替换、进程异常中止），这里也一定能兜住。
+            inventory.clear();
+
             List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
             List<ItemStack> items = plugin.lootParser().parseGroup(group, booksOnly);
             if (items.isEmpty()) {
@@ -1437,16 +1445,35 @@ public final class GameEngine {
         return List.copyOf(chests);
     }
 
+    /**
+     * 清掉本局生成的奖励箱：先清空内容，再删除方块本身。
+     *
+     * <p>只 {@code setType(AIR)} 也能连内容一起丢掉，显式 clear 一层是为了覆盖
+     * 「坐标上已经不是箱子」（被玩家换成别的容器或挖走又放回）这类边角情形，
+     * 同时让收尾日志能反映真实清理结果，而不是静默地什么也没做。</p>
+     *
+     * <p><b>必须在 {@code chests} 还是满的时候调用。</b>{@link #resetRuntimeState()}
+     * 刻意不再清空这个列表——它先于本方法执行，一旦它清了，这里就无事可做。</p>
+     */
     private void clearChests() {
+        if (chests.isEmpty()) {
+            return;
+        }
+        int removed = 0;
         for (Location location : chests) {
             Block block = location.getBlock();
-            if (block.getType() == Material.CHEST) {
-                if (block.getState() instanceof Chest chest) {
-                    chest.getInventory().clear();
-                }
-                block.setType(Material.AIR, false);
+            if (block.getType() != Material.CHEST) {
+                continue;// 箱子已被挖走/替换：没有内容留下，但也不计入清理数
             }
+            // 用活体方块实体（useSnapshot=false）而不是快照：与 spawnChests() 保持一致，
+            // 改动直接落在 chunk 里的方块实体上，不依赖 update() 写回
+            if (block.getState(false) instanceof Container container) {
+                container.getInventory().clear();
+            }
+            block.setType(Material.AIR, false);
+            removed++;
         }
+        plugin.getLogger().info("奖励箱：已清空并移除 " + removed + "/" + chests.size() + " 个");
         chests.clear();
     }
 
@@ -2027,7 +2054,11 @@ public final class GameEngine {
         disconnectedSpectators.clear();
         spectatorGrace.clear();
         lastDamager.clear();
-        chests.clear();
+        // chests 刻意**不在这里**清空：它是 clearChests() 的待办清单，而本方法在两条
+        // 清理路径（finishGame / forceCleanup）里都排在 clearChests() 之前。
+        // 若在此清空，clearChests() 会遍历一个空列表、一个箱子都不清，奖励箱连同
+        // 上一局的物品就原地留到下一局（实测 bug：开局看到箱子里还有上局的物品）。
+        // 清空动作由 clearChests() 自己负责。
         prepareClicks = 0;
         duelTeleported = false;
         lastOvertimeSecond = -1L;
