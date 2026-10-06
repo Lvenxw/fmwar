@@ -113,3 +113,29 @@
 
 注意决斗圈 2（`duel-2`，y 范围 99~101）因 `Settings.resolveExactY` 强制锁定高度，
 走 `SafeLocation.exact()`，**不做地形搜索、不受影响**。
+
+## 修正三：奖励箱清理被状态复位短路（内容跨局残留）
+
+**症状**：开局后打开奖励箱，能看到上一局没被取走的物品与新放入的物品混在一起。
+
+**根因不在清场逻辑本身，而在调用顺序**。`finishGame()` / `forceCleanup()` 的收尾顺序是
+`resetRuntimeState()` → `clearChests()`，而 `resetRuntimeState()` 里有一句
+`chests.clear()`——奖励箱坐标清单在清箱之前就被清空了，`clearChests()` 遍历的是一个空列表，
+**一个箱子都没动过**，而且它当时连日志都不打，所以这个问题一直是静默的。
+
+奖励箱方块于是跨局留在场地里；下一局 `spawnChests()` 又只 `setItem` 逐槽覆盖，
+而 `chests.loot-groups` 的一行通常 1~2 件、箱子有 27 格，没被覆盖的槽位就把上一局的内容留下了。
+
+**修复**：
+
+1. `resetRuntimeState()` 不再清空 `chests`。它**不是普通运行期状态，而是 `clearChests()`
+   的待办清单**——把"待执行任务的输入"混进"清空状态的公共实现"里，必然踩这个坑。
+   清空动作归还给 `clearChests()` 自己。
+2. `spawnChests()` 写入前 `inventory.clear()`：开局干净不再依赖上一局的清箱是否成功，幂等。
+3. `clearChests()` 改用活体方块实体（`getState(false)` + `Container` 接口），并补收尾日志
+   `奖励箱：已清空并移除 X/Y 个`——静默是这类 bug 得以长期潜伏的土壤。
+
+**遗留（本次未做）**：`ArenaCleaner` 只删实体，不清**方块容器**（玩家自己在场地里摆的箱子、木桶等）。
+需求 118 原文是"清空游戏场地范围内所有实体"，方块容器严格说不属于实体；
+若要一并清，需要在区块枚举时顺带扫 `Chunk#getTileEntities()` 并按 `Container` 清空内容。
+
