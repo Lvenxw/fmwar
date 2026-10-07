@@ -709,10 +709,18 @@ public final class GameEngine {
 
     /** 右键返回大厅按钮：退出队列并回大厅。 */
     public void leaveToHall(Player player) {
-        queue.remove(player.getUniqueId());
+        UUID uuid = player.getUniqueId();
+        // 只对“本局相关玩家”生效。这个按钮位于准备房间内，但“在准备房间里”不等于
+        // “已入队”——若不加这一关，任何路人在准备房间点到它都会被 FMWar 传送走、
+        // 记分板被摘掉，还会触发一次全局的“退出游戏队列”播报（此前就是这样）。
+        if (!isParticipant(uuid)) {
+            debug("玩家 " + player.getName() + " 点击了返回大厅，但不是本局相关玩家，已忽略");
+            return;
+        }
+        queue.remove(uuid);
         // 传送本身由 teleport() 临时放行后立即恢复，这里不需要额外处理领地权限
         teleport(player, config.settings().location("hall-spawn"));
-        teams.leaveAll(player.getUniqueId());
+        teams.leaveAll(uuid);
         scoreboard.detach(player);
         alerts.sendTo(player, "queue-left-self", Map.of());
         alerts.broadcast("queue-leave", Map.of("player", player.getName()));
@@ -836,9 +844,33 @@ public final class GameEngine {
         return members.contains(uuid);
     }
 
+    /**
+     * 玩家是否正在参与本插件玩法：对局中 / 已入队等候 / 正在观战。
+     *
+     * <p>本插件对玩家施加的一切<b>有副作用的操作</b>（清背包、改游戏模式、传送、取消动作、
+     * 改写重生点……）都必须先过这一关——服务器上与本局无关的玩家，FMWar 一根手指都不该碰。</p>
+     *
+     * <p>它<b>不等同</b>于 {@link #isMember}：排队中的玩家在开局前还不是成员，观战者永远
+     * 不是成员，但他们同样属于“本局相关玩家”。反过来，准备房间里的路人、提示接收范围内
+     * 路过的玩家都不算。</p>
+     */
+    public boolean isParticipant(UUID uuid) {
+        return members.contains(uuid) || queue.contains(uuid) || teams.inSpectatorTeam(uuid);
+    }
+
     /** 对局名单人数（包含暂时离线的成员）。 */
     public int memberCount() {
         return members.size();
+    }
+
+    /**
+     * 死亡淘汰时是否保留玩家已有经验（{@code start.keep-experience}）。
+     *
+     * <p>由 {@code PlayerStateListener} 在死亡事件里读取：清背包只管物品，
+     * 经验值是否随死亡没收是另一件事，用一个显式开关表达，避免"清背包"的语义继续膨胀。</p>
+     */
+    public boolean keepExperienceOnDeath() {
+        return config.settings().start().keepExperience();
     }
 
     /**
@@ -971,6 +1003,7 @@ public final class GameEngine {
         // 需求：开局把场内玩家（队伍 fm）改成生存模式
         player.setGameMode(GameMode.SURVIVAL);
         if (settings.start().clearInventory()) {
+            // 只清物品：经验值（等级/经验条/总经验）不在这里，也不该在这里被顺手清掉
             player.getInventory().clear();
             player.setItemOnCursor(null);
         }
@@ -1683,6 +1716,7 @@ public final class GameEngine {
     private void clearPlayerState(Player player) {
         Settings settings = config.settings();
         if (settings.start().clearInventory()) {
+            // 只清物品；经验值归玩家自己（死亡路径的保留见 PlayerStateListener 的 keepLevel）
             player.getInventory().clear();
             player.setItemOnCursor(null);
         }

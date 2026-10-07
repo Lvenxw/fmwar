@@ -101,7 +101,14 @@ public final class ResidenceService {
 
     private void open(List<String> regions) {
         for (String region : regions) {
-            apply(region, true);
+            // 引用计数：深度由 0 变 1 时才真正下发“打开”。
+            // 同一片领地会被多次并发传送同时需要（开局分散是逐人异步传送的），
+            // 若不做计数，先落地那次传送的关闭动作会把权限关掉，后一次传送就被
+            // 领地插件拦下——表现为“有人传送成功、有人留在原地”。
+            int depth = opened.merge(region, 1, Integer::sum);
+            if (depth == 1) {
+                apply(region, true);
+            }
         }
     }
 
@@ -121,6 +128,17 @@ public final class ResidenceService {
 
     private void closeAll(List<String> regions) {
         for (String region : regions) {
+            Integer depth = opened.get(region);
+            if (depth == null) {
+                // 没有对应的打开记录（例如 stop() 与正常的 closeLater 撞在一起）：忽略，
+                // 不能把它当成一次“多出来的关闭”去误关别人正在用的权限
+                continue;
+            }
+            if (depth > 1) {
+                opened.put(region, depth - 1);
+                continue;
+            }
+            opened.remove(region);
             apply(region, false);
         }
     }

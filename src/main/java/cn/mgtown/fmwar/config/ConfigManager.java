@@ -188,6 +188,8 @@ public final class ConfigManager {
         Settings.Start start = new Settings.Start(
                 yaml.getBoolean("start.clear-inventory", true),
                 yaml.getBoolean("start.clear-effects", true),
+                // 默认 true：清背包不该顺手把玩家的经验也清掉
+                yaml.getBoolean("start.keep-experience", true),
                 yaml.getBoolean("start.block-sneak", false),
                 yaml.getBoolean("start.loot-books-only", true),
                 yaml.getBoolean("start.resistance.enabled", true),

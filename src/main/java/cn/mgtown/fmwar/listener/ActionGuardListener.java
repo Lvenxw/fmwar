@@ -1,6 +1,7 @@
 package cn.mgtown.fmwar.listener;
 
 import cn.mgtown.fmwar.config.Region;
+import cn.mgtown.fmwar.game.GameEngine;
 import cn.mgtown.fmwar.service.AlertService;
 import cn.mgtown.fmwar.service.ConfigService;
 import org.bukkit.entity.Player;
@@ -25,10 +26,12 @@ public final class ActionGuardListener implements Listener {
 
     private final ConfigService config;
     private final AlertService alerts;
+    private final GameEngine engine;
 
-    public ActionGuardListener(ConfigService config, AlertService alerts) {
+    public ActionGuardListener(ConfigService config, AlertService alerts, GameEngine engine) {
         this.config = config;
         this.alerts = alerts;
+        this.engine = engine;
     }
 
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
@@ -36,7 +39,7 @@ public final class ActionGuardListener implements Listener {
         if (!(event.getEntity() instanceof Player player)) {
             return;
         }
-        if (!inNotifyRegion(player)) {
+        if (!restricted(player)) {
             return;
         }
         event.setCancelled(true);
@@ -54,14 +57,29 @@ public final class ActionGuardListener implements Listener {
         if (!config.settings().start().blockSneak()) {
             return;
         }
-        if (!inNotifyRegion(player)) {
+        if (!restricted(player)) {
             return;
         }
         event.setCancelled(true);
     }
 
-    private boolean inNotifyRegion(Player player) {
+    /**
+     * 这名玩家此刻是否该受行为限制。两个条件缺一不可：
+     *
+     * <ol>
+     *   <li><b>落在提示接收范围内</b>——需求文案的判定口径；</li>
+     *   <li><b>是本局相关玩家</b>（对局中 / 已入队 / 观战中）。</li>
+     * </ol>
+     *
+     * <p>第二条是必须补上的边界：提示接收范围是一个**坐标盒子**，服务器上与本局无关的
+     * 玩家只要路过这个范围，骑乘就会被取消——那是越界。FMWar 只约束自己流程里的玩家；
+     * 局外玩家的骑乘/潜行一律交还原版。</p>
+     */
+    private boolean restricted(Player player) {
         Region notify = config.settings().optionalRegion("notify");
-        return notify != null && notify.contains(player.getLocation());
+        if (notify == null || !notify.contains(player.getLocation())) {
+            return false;
+        }
+        return engine.isParticipant(player.getUniqueId());
     }
 }

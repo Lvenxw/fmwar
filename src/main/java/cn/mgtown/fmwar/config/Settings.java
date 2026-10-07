@@ -216,9 +216,21 @@ public record Settings(
         }
     }
 
+    /**
+     * 开局与离场时的玩家状态处理。
+     *
+     * @param clearInventory 开局是否清空背包
+     * @param clearEffects   开局是否清空药水效果
+     * @param keepExperience 死亡淘汰时是否保留玩家已有经验。
+     *                       清背包只管物品：原版死亡默认在重生那一刻把经验清零，
+     *                       由 {@code PlayerDeathEvent#setKeepLevel} 决定是否保留，
+     *                       与背包清理无关。见 {@code config.yml} 的
+     *                       {@code start.keep-experience}
+     */
     public record Start(
             boolean clearInventory,
             boolean clearEffects,
+            boolean keepExperience,
             boolean blockSneak,
             boolean lootBooksOnly,
             boolean resistanceEnabled,

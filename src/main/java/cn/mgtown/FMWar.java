@@ -65,7 +65,7 @@ public final class FMWar extends JavaPlugin {
         getServer().getPluginManager().registerEvents(
                 new PlayerStateListener(engine), this);
         getServer().getPluginManager().registerEvents(
-                new ActionGuardListener(configService, alertService), this);
+                new ActionGuardListener(configService, alertService, engine), this);
 
         CommandHandler handler = new CommandHandler(
                 this, configService, alertService, engine, teamService, shopService,

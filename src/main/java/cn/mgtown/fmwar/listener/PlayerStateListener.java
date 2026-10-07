@@ -38,9 +38,21 @@ public final class PlayerStateListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDeath(PlayerDeathEvent event) {
         Player player = event.getEntity();
+        // 只处理**本局参战玩家**：清掉落是本局规则，绝不能让 FMWar 影响服务器上
+        // 其他玩家在自己世界里死亡时的掉落与经验。
+        if (!engine.isMember(player.getUniqueId())) {
+            return;
+        }
         // 需求：死亡玩家的背包要被清空。原版死亡会先把物品掉在场地里，
         // 因此先清空掉落，再交给引擎做淘汰与计分。
         event.getDrops().clear();
+        // 经验值不属于"背包内容"，不能被清背包顺手抹掉。
+        // 原版在**重生那一刻**把经验清零，开关是 keepLevel；droppedExp 只管"地上掉几个
+        // 经验球"，两者必须分开设置——此前只设了 droppedExp=0，经验球没了，
+        // 玩家的等级也在重生时被清空，看起来就是"清背包把经验也清空了"。
+        if (engine.keepExperienceOnDeath()) {
+            event.setKeepLevel(true);
+        }
         event.setDroppedExp(0);
         engine.onPlayerDeath(player);
     }
@@ -49,6 +61,11 @@ public final class PlayerStateListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDamage(EntityDamageByEntityEvent event) {
         if (!(event.getEntity() instanceof Player victim)) {
+            return;
+        }
+        // 同样只关心本局参战玩家：服务器上其他玩家之间的互殴与 FMWar 无关，
+        // 不必走到解析伤害来源那一步（击杀分的资格判定在引擎里还有一道）。
+        if (!engine.isMember(victim.getUniqueId())) {
             return;
         }
         Player damager = resolveDamager(event.getDamager());
