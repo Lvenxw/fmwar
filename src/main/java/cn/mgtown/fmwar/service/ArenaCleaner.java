@@ -1,6 +1,8 @@
 package cn.mgtown.fmwar.service;
 
 import cn.mgtown.fmwar.config.Region;
+import cn.mgtown.fmwar.util.Schedulers;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Chunk;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
@@ -9,12 +11,13 @@ import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 场地清场：清掉场地范围内的所有实体，**包括未加载区块里的**。
@@ -42,6 +45,12 @@ import java.util.Set;
  *   <li><b>每tick 限量</b>：无论同步还是异步部分，都按 {@code cleanup.chunks-per-tick}
  *       分批，绝不在单个 tick 内把上千个区块处理完。</li>
  * </ul>
+ *
+ * <p><b>线程模型</b>：驱动游标（{@link SweepStep#run()}）跑在插件权威线程
+ * （{@link Schedulers#onMain}，Paper 上即主线程，Folia 上是全局区域线程）；
+ * 真正的区块清理派发到 {@link Schedulers#onRegion}，即<b>拥有该区块的区域线程</b>——
+ * Folia 上从别的线程直接读方块/实体是非法的。因此统计计数器与收尾标志全部改用原子类型，
+ * 它们会被多个区域线程并发写入。</p>
  */
 public final class ArenaCleaner {
 
@@ -58,34 +67,42 @@ public final class ArenaCleaner {
 
     private final Plugin plugin;
     private final ConfigService config;
+    private final Schedulers schedulers;
 
     /**
      * 对局期间活动过的区块（打包成 long 作为键）。
      *
      * <p>用 {@link LinkedHashSet} 而非 {@code HashSet}：结算时按插入顺序处理，
      * 于是“先被加载过的区块”先被清理，行为可预期。</p>
+     *
+     * <p>只在权威线程上读写（{@link #track()} 由引擎 tick 调用、{@link #buildQueue}
+     * 在 {@link #start()} 里调用），因此刻意<b>不</b>做并发保护。</p>
      */
     private final Set<Long> touchedChunks = new LinkedHashSet<>();
 
-    /** 正在进行的分批扫荡任务；同一时间只允许一个。 */
-    private BukkitTask sweepTask;
+    /** 正在进行的分批扫荡任务；同一时间只允许一个。跨线程读写，故 volatile。 */
+    private volatile ScheduledTask sweepTask;
     /**
      * 当前扫荡的“世代”标记。
      *
      * <p>存在它的唯一理由：{@link #cancel()} 只能取消定时任务，**无法取消已经发出的
-     * 区块加载回调**。这些回调仍会在稍后回到主线程，若不加以识别，它们会
+     * 区块加载回调**。这些回调仍会在稍后回到某个区域线程，若不加以识别，它们会
      * ① 用新一轮的计数器累加出错误统计，② 调 {@code finish()} 把<b>新一轮</b>的
      * 任务也置空，导致新一轮扫荡被静默掐断。每个 {@link SweepStep} 出生时领一个
      * 世代号，回来时先核对身份，不是自己这一轮就直接放弃。</p>
+     *
+     * <p>跨线程读（区域线程返回时核对），故 volatile。</p>
      */
-    private long sweepGeneration;
-    private int sweptChunks;
-    private int removedEntities;
-    private int failedChunks;
+    private volatile long sweepGeneration;
+    /** 以下三个计数器会被多个区域线程并发写入，必须原子。 */
+    private final AtomicInteger sweptChunks = new AtomicInteger();
+    private final AtomicInteger removedEntities = new AtomicInteger();
+    private final AtomicInteger failedChunks = new AtomicInteger();
 
-    public ArenaCleaner(Plugin plugin, ConfigService config) {
+    public ArenaCleaner(Plugin plugin, ConfigService config, Schedulers schedulers) {
         this.plugin = plugin;
         this.config = config;
+        this.schedulers = schedulers;
     }
 
     // ------------------------------------------------------------------
@@ -155,9 +172,9 @@ public final class ArenaCleaner {
         }
 
         cancel();
-        sweptChunks = 0;
-        removedEntities = 0;
-        failedChunks = 0;
+        sweptChunks.set(0);
+        removedEntities.set(0);
+        failedChunks.set(0);
 
         if (touchedChunks.isEmpty()) {
             // 没有任何追踪记录（例如对局没跑过主循环就被中止），
@@ -181,10 +198,12 @@ public final class ArenaCleaner {
         int budget = config.settings().cleanup().safeChunksPerTick();
         plugin.getLogger().info("场地清场：共 " + queue.size() + " 个区块待处理"
                 + "（每 tick " + budget + " 个，分批进行不影响玩家返回大厅）");
-        // 下一 tick 才开始，且每 tick 只处理 budget 个：主线程不再被清场占用
+        // 下一 tick 才开始，且每 tick 只处理 budget 个：权威线程不再被清场占用。
+        // 驱动用 GlobalRegionScheduler（单线程、每 tick 推进），单个区块的清理
+        // 再由 SweepStep 派发到该区块所属的区域线程——见类文档的“线程模型”。
         long generation = ++sweepGeneration;
-        sweepTask = plugin.getServer().getScheduler().runTaskTimer(
-                plugin, new SweepStep(world, arena, queue, budget, generation), 1L, 1L);
+        SweepStep step = new SweepStep(world, arena, queue, budget, generation);
+        sweepTask = schedulers.mainTimer(step, 1L, 1L);
     }
 
     /**
@@ -193,6 +212,10 @@ public final class ArenaCleaner {
      * <p>供插件停用等<b>不能再调度异步任务</b>的场合使用。此时不能临时加载区块
      * （加载后无人卸载，且停用过程中调度任务会抛异常）。未加载区块的残留留到下次
      * 正常结算时再清——服务器停机时这些区块本来就还在磁盘上。</p>
+     *
+     * <p><b>Folia 上直接跳过</b>：枚举 {@code world.getLoadedChunks()} 与随后逐区块的
+     * {@code chunk.getEntities()} / {@code entity.remove()} 都是跨区域访问，在全局线程上
+     * 做不了——而这条路径只由停用触发，代价是停用时清理不生效，残留留到下次正常结算。</p>
      */
     public void startLoadedOnly() {
         Region arena = config.settings().optionalRegion("arena");
@@ -204,6 +227,11 @@ public final class ArenaCleaner {
             return;
         }
         cancel();
+        if (schedulers.folia()) {
+            plugin.getLogger().info("场地清场（仅已加载区块）：Folia 上无法在停用路径枚举已加载区块，"
+                    + "已跳过；残留实体留待下次正常结算时清理");
+            return;
+        }
         int removed = 0;
         int chunks = 0;
         for (Chunk chunk : world.getLoadedChunks()) {
@@ -235,8 +263,10 @@ public final class ArenaCleaner {
     /**
      * 一轮扫荡的游标。
      *
-     * <p>{@code runTaskTimer} 的回调每 tick 调一次，因此这里持有索引，
-     * 每次至多领取 {@code budget} 个区块，处理完全部后自行取消任务并打收尾日志。</p>
+     * <p>{@link #run()} 由 {@link Schedulers#mainTimer} 在权威线程上每 tick 调一次，
+     * 因此游标 {@code cursor} 与队列都是<b>单线程</b>访问；真正的区块清理则由
+     * {@code process()} 派发到该区块所属的<b>区域线程</b>执行，因此
+     * {@code inFlight} 与 {@code done} 会被多个线程并发读写，必须原子。</p>
      */
     private final class SweepStep implements Runnable {
 
@@ -246,11 +276,12 @@ public final class ArenaCleaner {
         private final int budget;
         /** 本轮身份；用于识别“已被 cancel 掉的那一轮”的迟到回调。 */
         private final long generation;
-        private int cursor;
-        /** 已经发起、等待回调完成的区块数。 */
-        private int inFlight;
+        /** 只由权威线程推进；区域线程会读，故 volatile。 */
+        private volatile int cursor;
+        /** 已派发、尚未完成的区块数；被多个区域线程并发归还，原子。 */
+        private final AtomicInteger inFlight = new AtomicInteger();
         /** 本轮是否已收尾，避免 {@code finish()} 被调两次而重复打日志。 */
-        private boolean done;
+        private final AtomicBoolean done = new AtomicBoolean();
 
         SweepStep(World world, Region arena, List<long[]> queue, int budget, long generation) {
             this.world = world;
@@ -262,16 +293,18 @@ public final class ArenaCleaner {
 
         @Override
         public void run() {
-            if (generation != sweepGeneration || done) {
+            if (generation != sweepGeneration || done.get()) {
                 return;
             }
-            // 限制同时在途的数量：一次把整份队列派发出去会把主线程的回调队列塞满
-            while (inFlight < budget && cursor < queue.size()) {
-                long[] coord = queue.get(cursor++);
-                inFlight++;
+            // 先加 inFlight 再推 cursor：这样“inFlight 归零”的观察者一定能看到完整的
+            // cursor，不会在仍有待派发区块时误判“已全部完成”
+            while (inFlight.get() < budget && cursor < queue.size()) {
+                inFlight.incrementAndGet();
+                long[] coord = queue.get(cursor);
+                cursor++;
                 process((int) coord[0], (int) coord[1]);
             }
-            if (cursor >= queue.size() && inFlight == 0) {
+            if (cursor >= queue.size() && inFlight.get() == 0) {
                 finish();
             }
         }
@@ -280,74 +313,98 @@ public final class ArenaCleaner {
          * 处理单个区块：已加载的直接清；未加载的临时加载 → 清 → 卸载。
          *
          * <p><b>调用约定</b>：{@link #run()} 在调用本方法前已把 {@code inFlight} 加一。
-         * 本方法有三条出口，其中<b>两条是同步完成的</b>（已加载 / 从未生成），
-         * 它们必须自己把 {@code inFlight} 减回去——否则计数器只增不减，
-         * 扫到第 {@code budget} 个同步区块后 {@code while (inFlight < budget)} 永远为假，
+         * 三条出口都必须经由 {@link #onComplete()} 归还额度——否则计数器只增不减，
+         * 扫到第 {@code budget} 个区块后 {@code while (inFlight < budget)} 永远为假，
          * 整个扫荡就此卡死、{@link #finish()} 也不会被调用（连收尾日志都没有）。</p>
+         *
+         * <p>清理动作一律派发到 {@link Schedulers#onRegion}：Folia 上只有拥有该区块的
+         * 区域线程才能安全地读写它的方块与实体。</p>
          *
          * <p>{@code generate=false} 是硬性要求：万一区块在这段时间被删除，
          * 也不能因此生成新区块。</p>
          */
         private void process(int chunkX, int chunkZ) {
             if (world.isChunkLoaded(chunkX, chunkZ)) {
-                // 已加载：就地清理，不涉及加载/卸载，不会惊动客户端
-                inFlight--;
-                try {
-                    sweptChunks++;
-                    removedEntities += purge(world.getChunkAt(chunkX, chunkZ), arena);
-                } catch (RuntimeException exception) {
-                    failedChunks++;
-                }
+                // 已加载：派发到该区块所属区域线程就地清理，不涉及加载/卸载，不会惊动客户端
+                schedulers.onRegion(world, chunkX, chunkZ, () -> {
+                    try {
+                        if (generation != sweepGeneration || done.get()) {
+                            return;
+                        }
+                        // 派发与真正执行之间区块可能已被卸载。此时绝不能走 getChunkAt
+                        //（它会同步生成区块）——那正是本类禁止的事，直接跳过。
+                        if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                            return;
+                        }
+                        sweptChunks.incrementAndGet();
+                        removedEntities.addAndGet(purge(world.getChunkAt(chunkX, chunkZ), arena));
+                    } catch (RuntimeException exception) {
+                        failedChunks.incrementAndGet();
+                    } finally {
+                        onComplete();
+                    }
+                });
                 return;
             }
             if (!world.isChunkGenerated(chunkX, chunkZ)) {
                 // 从未生成过：里面不可能有掉落物，也不该为清场去生成它
-                inFlight--;
+                onComplete();
                 return;
             }
-            world.getChunkAtAsync(chunkX, chunkZ, false).whenComplete((chunk, error) -> {
-                // 回到主线程再动区块/实体：加载回调不保证线程
-                plugin.getServer().getScheduler().runTask(plugin, () -> {
-                    inFlight--;
-                    // 本轮已被取消/替换：区块已经加载上来了，但不再做后续处理。
-                    // 仍要卸载它，否则就是一次纯泄漏。
-                    if (generation != sweepGeneration || done) {
-                        unloadQuietly(world, chunkX, chunkZ);
-                        return;
-                    }
-                    try {
-                        if (error != null || chunk == null || !chunk.isLoaded()) {
-                            failedChunks++;
-                            return;
+            world.getChunkAtAsync(chunkX, chunkZ, false).whenComplete((chunk, error) ->
+                    // 加载回调不保证线程：统一回到该区块所属的区域线程再动它
+                    schedulers.onRegion(world, chunkX, chunkZ, () -> {
+                        try {
+                            // 本轮已被取消/替换：区块已经加载上来了，但不再做后续处理。
+                            // 仍要卸载它，否则就是一次纯泄漏。
+                            if (generation != sweepGeneration || done.get()) {
+                                return;
+                            }
+                            if (error != null || chunk == null || !chunk.isLoaded()) {
+                                failedChunks.incrementAndGet();
+                                return;
+                            }
+                            sweptChunks.incrementAndGet();
+                            removedEntities.addAndGet(purge(chunk, arena));
+                        } catch (RuntimeException exception) {
+                            failedChunks.incrementAndGet();
+                        } finally {
+                            unloadQuietly(world, chunkX, chunkZ);
+                            onComplete();
                         }
-                        sweptChunks++;
-                        removedEntities += purge(chunk, arena);
-                    } catch (RuntimeException exception) {
-                        failedChunks++;
-                    } finally {
-                        unloadQuietly(world, chunkX, chunkZ);
-                        if (cursor >= queue.size() && inFlight == 0) {
-                            finish();
-                        }
-                    }
-                });
-            });
+                    }));
+        }
+
+        /** 归还一份在途额度；全部派发完毕且全部完成时收尾。 */
+        private void onComplete() {
+            if (inFlight.decrementAndGet() > 0) {
+                return;
+            }
+            if (cursor >= queue.size()) {
+                finish();
+            }
         }
 
         private void finish() {
-            if (done) {
+            // 已被 cancel / 被新一轮替换的旧轮不许收尾：否则会用新一轮的计数器
+            // 打出一条属于旧轮的“清场完成”日志
+            if (generation != sweepGeneration) {
                 return;
             }
-            done = true;
-            if (generation == sweepGeneration && sweepTask != null) {
-                sweepTask.cancel();
+            if (!done.compareAndSet(false, true)) {
+                return;
+            }
+            ScheduledTask task = sweepTask;
+            if (task != null) {
+                task.cancel();
                 sweepTask = null;
             }
             StringBuilder message = new StringBuilder("场地清场完成：扫描 ")
-                    .append(sweptChunks).append(" 个区块，删除实体 ")
-                    .append(removedEntities).append(" 个");
-            if (failedChunks > 0) {
-                message.append("（另有 ").append(failedChunks).append(" 个区块未能处理）");
+                    .append(sweptChunks.get()).append(" 个区块，删除实体 ")
+                    .append(removedEntities.get()).append(" 个");
+            int failed = failedChunks.get();
+            if (failed > 0) {
+                message.append("（另有 ").append(failed).append(" 个区块未能处理）");
             }
             plugin.getLogger().info(message.toString());
         }
@@ -363,20 +420,30 @@ public final class ArenaCleaner {
      * <p>这个顺序是刻意的：已加载区块是玩家正看着的那一片，先清它们能让可见范围内的
      * 掉落物在最初几个 tick 内消失；而不需要加载/卸载的区块也优先处理，
      * 进一步减少对客户端的扰动。</p>
+     *
+     * <p><b>Folia 上没有“已加载优先”这一层。</b>枚举已加载区块（{@code getLoadedChunks()}）
+     * 本身就是一次跨区域的区块访问，全局线程做不了；此时退回“只按对局期间活动过的名单
+     * 清理”——这本来就是本类的核心设计，掉落物只可能出现在那批区块里。
+     * 换句话说 Folia 上少掉的只是排序优化，不漏清理范围。</p>
      */
     private List<long[]> buildQueue(World world, Region arena) {
         List<long[]> loadedFirst = new ArrayList<>();
         List<long[]> others = new ArrayList<>();
 
-        for (Chunk chunk : world.getLoadedChunks()) {
-            if (chunkIntersectsArena(chunk.getX(), chunk.getZ(), arena)) {
-                loadedFirst.add(new long[]{chunk.getX(), chunk.getZ()});
+        boolean canEnumerateLoaded = !schedulers.folia();
+        if (canEnumerateLoaded) {
+            for (Chunk chunk : world.getLoadedChunks()) {
+                if (chunkIntersectsArena(chunk.getX(), chunk.getZ(), arena)) {
+                    loadedFirst.add(new long[]{chunk.getX(), chunk.getZ()});
+                }
             }
         }
         for (long key : touchedChunks) {
             int x = (int) (key >> 32);
             int z = (int) key;
-            if (world.isChunkLoaded(x, z)) {
+            // 只有真的枚举过已加载区块时才能用“已加载”去重；Folia 上没有那份名单，
+            // 这里若照样跳过，这些区块就会既不在 loadedFirst 也不在 others 里，被整批漏掉。
+            if (canEnumerateLoaded && world.isChunkLoaded(x, z)) {
                 continue;// 已在 loadedFirst 里
             }
             if (!chunkIntersectsArena(x, z, arena)) {

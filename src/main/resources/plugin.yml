@@ -7,6 +7,11 @@ description: 附魔战争 - 场地 PvP 小游戏
 authors: [mgtown]
 softdepend: [ExtraShop, Residence]
 
+# 声明支持 Folia（区域化多线程）。Folia 会据此接受本插件加载；
+# Paper 上该键被忽略，不影响任何行为。代码侧的 Folia 化改造见
+# docs/folia-26.3-compat.md §6~§8。
+folia-supported: true
+
 commands:
   fmwar:
     description: 附魔战争管理指令

@@ -1,6 +1,7 @@
 package cn.mgtown.fmwar.service;
 
 import cn.mgtown.fmwar.config.Settings;
+import cn.mgtown.fmwar.util.Schedulers;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
@@ -30,15 +31,17 @@ public final class ResidenceService {
 
     private final Plugin plugin;
     private final ConfigService config;
+    private final Schedulers schedulers;
 
     /** 已打开权限的领地 -> 打开次数。 */
     private final Map<String, Integer> opened = new LinkedHashMap<>();
     /** 记录每片领地曾被执行过什么，便于停用时强制复位。 */
     private final Map<String, String> lastApplied = new LinkedHashMap<>();
 
-    public ResidenceService(Plugin plugin, ConfigService config) {
+    public ResidenceService(Plugin plugin, ConfigService config, Schedulers schedulers) {
         this.plugin = plugin;
         this.config = config;
+        this.schedulers = schedulers;
     }
 
     /** Residence 是否可用（按插件名判断，不引入编译期依赖）。 */
@@ -120,7 +123,9 @@ public final class ResidenceService {
      */
     private void closeLater(List<String> regions) {
         try {
-            plugin.getServer().getScheduler().runTaskLater(plugin, () -> closeAll(regions), CLOSE_DELAY_TICKS);
+            // 走权威线程（Paper 主线程 / Folia 全局区域线程）。这条任务只是下发
+            // /res set 指令、不碰世界与实体，因此派到全局即可，无需区域化。
+            schedulers.onMainLater(() -> closeAll(regions), CLOSE_DELAY_TICKS);
         } catch (RuntimeException exception) {
             closeAll(regions);
         }

@@ -15,6 +15,7 @@ import cn.mgtown.fmwar.service.PointsService;
 import cn.mgtown.fmwar.service.ResidenceService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
+import cn.mgtown.fmwar.util.Schedulers;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -36,6 +37,7 @@ public final class FMWar extends JavaPlugin {
     private ButtonCapture buttonCapture;
     private PointsService pointsService;
     private ResidenceService residenceService;
+    private Schedulers schedulers;
     private GameEngine engine;
 
     @Override
@@ -50,14 +52,16 @@ public final class FMWar extends JavaPlugin {
         }
 
         configService = new ConfigService(configManager);
-        alertService = new AlertService(configService);
-        teamService = new TeamService(configService);
-        gameScoreboard = new GameScoreboard(teamService);
+        // 唯一的调度入口：所有服务都通过它调度，绝不直接碰 Bukkit.getScheduler()
+        schedulers = new Schedulers(this);
+        alertService = new AlertService(configService, schedulers);
+        teamService = new TeamService(configService, schedulers);
+        gameScoreboard = new GameScoreboard(teamService, schedulers);
         shopService = new ShopService(this, configService);
         pointsService = new PointsService(this);
-        residenceService = new ResidenceService(this, configService);
+        residenceService = new ResidenceService(this, configService, schedulers);
         engine = new GameEngine(this, configService, alertService, teamService,
-                gameScoreboard, shopService, pointsService, residenceService);
+                gameScoreboard, shopService, pointsService, residenceService, schedulers);
         buttonCapture = new ButtonCapture(configService, alertService);
 
         getServer().getPluginManager().registerEvents(
@@ -69,7 +73,7 @@ public final class FMWar extends JavaPlugin {
 
         CommandHandler handler = new CommandHandler(
                 this, configService, alertService, engine, teamService, shopService,
-                buttonCapture, pointsService);
+                buttonCapture, pointsService, schedulers);
         PluginCommand command = getCommand("fmwar");
         if (command != null) {
             command.setExecutor(handler);

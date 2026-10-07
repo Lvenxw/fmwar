@@ -9,6 +9,7 @@ import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.PointsService;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
+import cn.mgtown.fmwar.util.Schedulers;
 import cn.mgtown.fmwar.util.TimeUtil;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -52,10 +53,12 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
     private final ShopService shops;
     private final ButtonCapture buttonCapture;
     private final PointsService points;
+    /** 读回奖励箱内容要落到该区块所属的区域线程上，故这里也需要调度入口。 */
+    private final Schedulers schedulers;
 
     public CommandHandler(FMWar plugin, ConfigService config, AlertService alerts,
                           GameEngine engine, TeamService teams, ShopService shops,
-                          ButtonCapture buttonCapture, PointsService points) {
+                          ButtonCapture buttonCapture, PointsService points, Schedulers schedulers) {
         this.plugin = plugin;
         this.config = config;
         this.alerts = alerts;
@@ -64,6 +67,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         this.shops = shops;
         this.buttonCapture = buttonCapture;
         this.points = points;
+        this.schedulers = schedulers;
     }
 
     @Override
@@ -73,7 +77,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             return true;
         }
         if (!sender.hasPermission("fmwar.admin")) {
-            sender.sendMessage(alerts.component(alerts.render("no-permission", Map.of())));
+            reply(sender, alerts.component(alerts.render("no-permission", Map.of())));
             return true;
         }
         switch (args[0].toLowerCase(Locale.ROOT)) {
@@ -148,6 +152,9 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
      *
      * <p>这是排查“箱子是空的”最快的手段：它读的是**方块实体里真实存在的内容**，
      * 而不是写入时的记录，因此能直接区分“没写进去”和“写了但没保存”。</p>
+     *
+     * <p>读取逐个派发到箱子所在区块的区域线程（Folia 上指令线程不能读别人的区块；
+     * Paper 上就地执行，回显顺序与改造前一致）。</p>
      */
     private void chest(CommandSender sender) {
         var locations = engine.chestLocations();
@@ -158,31 +165,33 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         }
         for (var location : locations) {
             String coords = location.getBlockX() + "," + location.getBlockY() + "," + location.getBlockZ();
-            if (!(location.getBlock().getState(false) instanceof org.bukkit.block.Chest chest)) {
-                line(sender, "chest-not-chest", Map.of("coords", coords));
-                continue;
-            }
-            var contents = chest.getBlockInventory().getContents();
-            int count = 0;
-            StringBuilder names = new StringBuilder();
-            for (var item : contents) {
-                if (item == null || item.getType().isAir()) {
-                    continue;
+            schedulers.runOwned(location, () -> {
+                if (!(location.getBlock().getState(false) instanceof org.bukkit.block.Chest chest)) {
+                    line(sender, "chest-not-chest", Map.of("coords", coords));
+                    return;
                 }
-                count++;
-                if (names.length() > 0) {
-                    names.append("、");
+                var contents = chest.getBlockInventory().getContents();
+                int count = 0;
+                StringBuilder names = new StringBuilder();
+                for (var item : contents) {
+                    if (item == null || item.getType().isAir()) {
+                        continue;
+                    }
+                    count++;
+                    if (names.length() > 0) {
+                        names.append("、");
+                    }
+                    names.append(displayNameOf(item)).append('x').append(item.getAmount());
                 }
-                names.append(displayNameOf(item)).append('x').append(item.getAmount());
-            }
-            if (count == 0) {
-                line(sender, "chest-empty", Map.of("coords", coords));
-            } else {
-                line(sender, "chest-line", Map.of(
-                        "coords", coords,
-                        "count", Integer.toString(count),
-                        "items", names.toString()));
-            }
+                if (count == 0) {
+                    line(sender, "chest-empty", Map.of("coords", coords));
+                } else {
+                    line(sender, "chest-line", Map.of(
+                            "coords", coords,
+                            "count", Integer.toString(count),
+                            "items", names.toString()));
+                }
+            });
         }
     }
 
@@ -350,11 +359,11 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
      */
     private void button(CommandSender sender, String[] args) {
         if (!(sender instanceof Player player)) {
-            sender.sendMessage(alerts.component("&c按钮校准需要在游戏内执行（要右键方块）"));
+            reply(sender, alerts.component("&c按钮校准需要在游戏内执行（要右键方块）"));
             return;
         }
         if (buttonCapture == null) {
-            sender.sendMessage(alerts.component("&c按钮校准功能未启用"));
+            reply(sender, alerts.component("&c按钮校准功能未启用"));
             return;
         }
         if (args.length >= 2) {
@@ -401,9 +410,24 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
         return builder.toString();
     }
 
+    /**
+     * 回显一条消息给指令发送者。
+     *
+     * <p>给玩家发消息属于玩家自身状态，在 Folia 上必须落在该玩家所属的区域线程；
+     * 控制台发送者则与线程无关。这里统一收口，指令代码里不再出现裸的
+     * {@code sender.sendMessage}。Paper 上 {@code runOwned} 就地执行，行为不变。</p>
+     */
+    private void reply(CommandSender sender, Component message) {
+        if (sender instanceof Player player) {
+            schedulers.runOwned(player, () -> player.sendMessage(message), null);
+            return;
+        }
+        sender.sendMessage(message);
+    }
+
     /** 按配置文案回显一行。 */
     private void line(CommandSender sender, String key, Map<String, String> placeholders) {
-        sender.sendMessage(alerts.component(alerts.render(key, placeholders)));
+        reply(sender, alerts.component(alerts.render(key, placeholders)));
     }
 
     private void usage(CommandSender sender, String label) {
@@ -423,7 +447,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             line(sender, "command-reload-problems",
                     Map.of("count", Integer.toString(validation.problems().size())));
             for (var problem : validation.problems()) {
-                sender.sendMessage(alerts.component("&7 - &f" + problem.path() + " &7" + problem.detail()));
+                reply(sender, alerts.component("&7 - &f" + problem.path() + " &7" + problem.detail()));
             }
         } else if (!ok) {
             // 理论上不会走到：ok=false 必然伴随校验问题
@@ -479,7 +503,7 @@ public final class CommandHandler implements CommandExecutor, TabCompleter {
             line(sender, "doctor-config-ok", Map.of());
         } else {
             for (var problem : validation.problems()) {
-                sender.sendMessage(alerts.component("&c - &f" + problem.path() + " &7" + problem.detail()));
+                reply(sender, alerts.component("&c - &f" + problem.path() + " &7" + problem.detail()));
             }
         }
         for (String shopLine : shops.diagnose()) {

@@ -8,7 +8,9 @@ import cn.mgtown.fmwar.service.ConfigService;
 import cn.mgtown.fmwar.service.GameScoreboard;
 import cn.mgtown.fmwar.service.ShopService;
 import cn.mgtown.fmwar.service.TeamService;
+import cn.mgtown.fmwar.util.Schedulers;
 import cn.mgtown.fmwar.util.TimeUtil;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -28,7 +30,6 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -40,7 +41,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import cn.mgtown.fmwar.config.Position;
 import cn.mgtown.fmwar.config.Region;
@@ -58,6 +63,26 @@ import org.bukkit.enchantments.Enchantment;
  * <p>整份规格的时序都挂在同一个时钟上（准备倒计时、game-duration 对局倒计时、
  * 归零后传送决赛圈并把计时重置为 duel-duration、再归零后每秒扣血），
  * 因此这里只允许存在一个循环，按阶段分派，避免多个定时器互相竞态。</p>
+ *
+ * <p><b>线程模型（本类最重要的一条约定）</b>：主循环由 {@link Schedulers#mainTimer} 驱动，
+ * 跑在插件的 <b>权威线程</b>上——Paper 上是主线程，Folia 上是全局区域线程，两者都是单线程。
+ * 对局状态（本类全部字段）<b>只允许权威线程改动</b>。为此：</p>
+ *
+ * <ul>
+ *   <li><b>外部入口先过守卫</b>：事件回调与指令在 Folia 上跑在“玩家所属区域线程”，与权威线程
+ *       并发。凡是会改状态的公开方法（右键按钮、上线/掉线/死亡、指令）入口第一句都是
+ *       {@link Schedulers#guardAuthoritative}——不在权威线程就整段重排过去。Paper 上判定恒为真，
+ *       一行都不多走，因此行为与改造前完全一致。</li>
+ *   <li><b>会被跨线程读的集合用并发实现</b>：{@code members} / {@code queue} / {@code lastDamager} /
+ *       {@code chests}。它们会被区域线程上的只读判定（{@code isMember} / {@code isParticipant}）
+ *       或区块线程上的收尾动作读到。其余集合只在权威线程访问，保持裸实现。</li>
+ *   <li><b>玩家自身状态派发到该玩家所属线程</b>：清背包、改游戏模式、改血量、重生……
+ *       统一走 {@link Schedulers#runOwned}；Paper 上就地执行，Folia 上才真正派发。</li>
+ *   <li><b>方块与区块派发到该区块所属区域线程</b>：奖励箱读写、落点地形采样同理。</li>
+ * </ul>
+ *
+ * <p>所有调度一律走 {@link Schedulers}，绝不使用在 Folia 上会直接抛异常的
+ * {@code Bukkit.getScheduler()}。</p>
  */
 public final class GameEngine {
 
@@ -89,18 +114,42 @@ public final class GameEngine {
     private final ShopService shops;
     private final PointsService points;
     private final ResidenceService residence;
+    /** 唯一的调度入口：四类 Paper 调度器，跨 Paper / Folia 可用。 */
+    private final Schedulers schedulers;
 
-    /** 受害者 -> 最后一名对其造成伤害的玩家：死亡时据此记击杀分。 */
-    private final Map<UUID, UUID> lastDamager = new HashMap<>();
+    /**
+     * 受害者 -> 最后一名对其造成伤害的玩家：死亡时据此记击杀分。
+     *
+     * <p>用并发表：写入发生在“造成伤害的那一 tick 的受害者所在区域线程”，而读取与移除
+     * 发生在权威线程（{@link #onPlayerDeath}）。这里<b>刻意不做入口重排</b>——
+     * 记伤害必须原地、按事件顺序发生，否则“先记伤害、后判死亡”的先后关系会被打乱。
+     * 相邻两次伤害事件的顺序在同一个受害者线程上是确定的，因此并发表 + 先写后读即可。</p>
+     */
+    private final Map<UUID, UUID> lastDamager = new ConcurrentHashMap<>();
 
-    /** 当前阶段。 */
-    private GamePhase phase = GamePhase.IDLE;
-    /** 当前阶段的计时器，IDLE 时为 null。 */
-    private Timer timer;
-    /** 已加入队列的玩家（准备房间阶段）。 */
-    private final Set<UUID> queue = new LinkedHashSet<>();
-    /** 正在对局中的玩家（队伍 fm）。 */
-    private final Set<UUID> members = new LinkedHashSet<>();
+    /**
+     * 当前阶段。只由权威线程写；指令线程会读它做状态展示，故 volatile。
+     */
+    private volatile GamePhase phase = GamePhase.IDLE;
+    /** 当前阶段的计时器，IDLE 时为 null。只由权威线程写，指令线程读，故 volatile。 */
+    private volatile Timer timer;
+    /**
+     * 已加入队列的玩家（准备房间阶段）。
+     *
+     * <p>用并发表：只有权威线程会增删它，但它会被区域线程上的
+     * {@link #isParticipant} 读到（骑乘拦截要在事件里同步判定）。
+     * 代价是失去插入顺序——本集合的用途全是“计数 / 全员相同的提示”，顺序无关。</p>
+     */
+    private final Set<UUID> queue = ConcurrentHashMap.newKeySet();
+    /**
+     * 正在对局中的玩家（队伍 fm）。
+     *
+     * <p>同样用并发表：权威线程增删，区域线程读（{@link #isMember} / {@link #isParticipant}）。
+     * 现存的顺序依赖只有“取第一个存活者作为胜者”，而那一步只在存活人数恰好为 1 时才发生。
+     * 改动前它是 {@code LinkedHashSet}，因此仍有插入顺序；换成并发集合后顺序不再保证，
+     * 若日志顺序对你的排查有影响，请以玩家名字而不是出场顺序为准。</p>
+     */
+    private final Set<UUID> members = ConcurrentHashMap.newKeySet();
     /** 准备房间上一 tick 的玩家集合，用于“有玩家进入则重置”。 */
     private Set<UUID> prepRoster = Set.of();
     /** 连续右键准备按钮的次数。 */
@@ -115,8 +164,13 @@ public final class GameEngine {
     private long lastEmeraldCountdownShown = -1L;
     /** 是否已经执行过决斗圈传送。 */
     private boolean duelTeleported;
-    /** 本局生成的奖励箱方块坐标（结束时清理）。 */
-    private final List<Location> chests = new ArrayList<>();
+    /**
+     * 本局生成的奖励箱方块坐标（结束时清理）。
+     *
+     * <p>用并发列表：实际放箱子/清箱子的方块读写会派发到各区块所属的区域线程，
+     * 登记与清理不再只发生在权威线程上。</p>
+     */
+    private final List<Location> chests = new CopyOnWriteArrayList<>();
     /** 把无关玩家送出场地后的冷却（tick），防止传送被取消时每 tick 反复重传。 */
     private final Map<UUID, Long> outsiderCooldown = new HashMap<>();
     private static final long OUTSIDER_COOLDOWN_TICKS = 100L;
@@ -143,8 +197,14 @@ public final class GameEngine {
     private final Map<UUID, Long> spectatorGrace = new HashMap<>();
     private static final long SPECTATOR_GRACE_TICKS = 60L;
 
-    /** 被本插件淘汰、等待主动重生的玩家：只有这些人的重生点会被改写为大厅。 */
-    private final Set<UUID> pendingRespawn = new HashSet<>();
+    /**
+     * 被本插件淘汰、等待主动重生的玩家：只有这些人的重生点会被改写为大厅。
+     *
+     * <p>用并发集合：写入发生在权威线程（{@code eliminate}），而读取与移除发生在
+     * 玩家所属线程（{@code scheduleRespawn} 的 respawn 流程与 {@code PlayerRespawnEvent}），
+     * Folia 上两者不是同一个线程。</p>
+     */
+    private final Set<UUID> pendingRespawn = ConcurrentHashMap.newKeySet();
     /** 刚被淘汰的玩家 → 豁免截止 tick：避免其被“无关玩家清场”逻辑二次传送与误提示。 */
     private final Map<UUID, Long> recentEliminations = new HashMap<>();
     private static final long ELIMINATION_GRACE_TICKS = 100L;
@@ -170,24 +230,27 @@ public final class GameEngine {
      */
     private long lastTrackTick;
 
-    /** 最近一次分散的结果摘要，写进开局日志（便于确认落点而不是“又传到场地传送点”）。 */
+    /** 最近一次分散的结果摘要，随“分散完成”一并写进日志（便于确认落点而不是“又传到场地传送点”）。 */
     private String lastDisperseReport = "未执行";
     /**
      * 调试日志开关（{@code /fmwar debug}）。
      *
      * <p>用 INFO 级别而不是 fine：这样不需要改服务端日志配置就能看到，
      * 排查“按钮没反应/倒计时不启动”这类问题可以直接开关。</p>
+     *
+     * <p>它只是一个开关，切换动作本身不需要重排到权威线程；用 volatile 保证
+     * 指令线程与主循环之间的可见性即可，也不必牺牲 {@code toggleDebug()} 的返回值。</p>
      */
-    private boolean debug;
+    private volatile boolean debug;
 
     /** 决斗圈的随机选择器（本局选定后不再变化，保证所有人进同一个圈）。 */
     private final java.util.Random duelRandom = new java.util.Random();
 
-    private BukkitTask tickTask;
+    private ScheduledTask tickTask;
 
     public GameEngine(FMWar plugin, ConfigService config, AlertService alerts,
                       TeamService teams, GameScoreboard scoreboard, ShopService shops,
-                      PointsService points, ResidenceService residence) {
+                      PointsService points, ResidenceService residence, Schedulers schedulers) {
         this.plugin = plugin;
         this.config = config;
         this.alerts = alerts;
@@ -196,7 +259,8 @@ public final class GameEngine {
         this.shops = shops;
         this.points = points;
         this.residence = residence;
-        this.cleaner = new ArenaCleaner(plugin, config);
+        this.schedulers = schedulers;
+        this.cleaner = new ArenaCleaner(plugin, config, schedulers);
     }
 
     /**
@@ -208,6 +272,10 @@ public final class GameEngine {
      * @return 是否修改成功
      */
     public boolean setRemainingSeconds(long seconds) {
+        // 指令线程入口：状态机只允许权威线程改，先重排过去
+        if (!schedulers.guardAuthoritative(() -> setRemainingSeconds(seconds))) {
+            return false;
+        }
         if (phase != GamePhase.RUNNING || timer == null) {
             return false;
         }
@@ -248,7 +316,8 @@ public final class GameEngine {
             plugin.getLogger().severe("配置中的世界不存在，附魔战争玩法无法启动；请修正 config.yml 的 world / regions.*.world");
             return;
         }
-        tickTask = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
+        // 主循环挂在权威线程上：Paper 主线程 / Folia 全局区域线程，都是单线程、每 tick 推进
+        tickTask = schedulers.mainTimer(this::tick, 1L, 1L);
         preloadChunks();
     }
 
@@ -304,6 +373,9 @@ public final class GameEngine {
 
     /** /fmwar reload 之后重新解析世界引用并重跑区块预加载。 */
     public void onReload() {
+        if (!schedulers.guardAuthoritative(this::onReload)) {
+            return;
+        }
         World resolved = resolveWorld();
         if (resolved == null) {
             plugin.getLogger().warning("reload 后世界仍不可用，玩法的传送与奖励箱不会生效");
@@ -550,6 +622,16 @@ public final class GameEngine {
         }
     }
 
+    /**
+     * 切换玩家的游戏模式。
+     *
+     * <p>游戏模式是玩家自身状态，Folia 上必须在该玩家所属线程改。这里统一收口，
+     * 免得每个调用点各自展开一次派发；Paper 上就地执行，与改造前完全一致。</p>
+     */
+    private void setGameMode(Player player, GameMode mode) {
+        schedulers.runOwned(player, () -> player.setGameMode(mode), null);
+    }
+
     /** 切换调试日志；返回切换后的状态。 */
     public boolean toggleDebug() {
         debug = !debug;
@@ -660,6 +742,10 @@ public final class GameEngine {
 
     /** 右键准备按钮。 */
     public void prepareClick(Player player) {
+        // 事件回调在 Folia 上跑在该玩家所属区域线程，而 prepareClicks/timer/phase 只许权威线程改
+        if (!schedulers.guardAuthoritative(() -> prepareClick(player))) {
+            return;
+        }
         Settings settings = config.settings();
         long required = settings.timing().prepareClicks();
         debug("准备按钮被点击：玩家=" + player.getName() + " 阶段=" + phase
@@ -709,6 +795,9 @@ public final class GameEngine {
 
     /** 右键返回大厅按钮：退出队列并回大厅。 */
     public void leaveToHall(Player player) {
+        if (!schedulers.guardAuthoritative(() -> leaveToHall(player))) {
+            return;
+        }
         UUID uuid = player.getUniqueId();
         // 只对“本局相关玩家”生效。这个按钮位于准备房间内，但“在准备房间里”不等于
         // “已入队”——若不加这一关，任何路人在准备房间点到它都会被 FMWar 传送走、
@@ -746,22 +835,71 @@ public final class GameEngine {
     }
 
     public boolean tryJoinQueue(Player player) {
+        // 入队要改 queue / timer / phase，全是权威线程的状态；事件回调可能不在那个线程上。
+        // 重排后本次返回 false——调用方（右键监听）不使用返回值，只是“没触发动作”。
+        if (!schedulers.guardAuthoritative(() -> tryJoinQueue(player))) {
+            return false;
+        }
         // 先判阶段：对局已经开打（含正在结算的那一 tick）时直接拒绝，
         // 避免下面为“准备倒计时期间的加入”取消倒计时这件事被误触发。
-        if (phase != GamePhase.IDLE && phase != GamePhase.PREPARING) {
-            alerts.sendTo(player, "game-already-running", Map.of());
+        if (!canJoinNow(player)) {
             return false;
         }
 
         // 需求：入队前必须清空背包（含光标上的物品）。
         // 检查刻意放在 cancelCountdown 之前：一次无效点击不该把正在跑的倒计时取消掉，
         // 也不该让玩家带着上一局的装备进入准备房间。
-        if (hasAnyItem(player)) {
-            debug("玩家 " + player.getName() + " 入队被拒：背包未清空");
-            alerts.sendTo(player, "queue-inventory-not-empty", Map.of());
+        //
+        // 而“读玩家背包”改的是玩家自身状态，在 Folia 上必须落在该玩家所属的区域线程。
+        // 已拥有（Paper 上恒成立）就地读，与改造前逐字一致；否则先派发过去读，
+        // 读完再回权威线程继续——因为下面的 finishJoin 要改 queue / timer / phase。
+        if (schedulers.owns(player)) {
+            if (hasAnyItem(player)) {
+                rejectJoinDirtyInventory(player);
+                return false;
+            }
+            finishJoin(player);
+            return true;
+        }
+        schedulers.runOwned(player, () -> {
+            boolean dirty = hasAnyItem(player);
+            schedulers.onMain(() -> {
+                // 派发期间玩家可能已离线，阶段也可能已经变化，都要重新判一次
+                if (!player.isOnline() || !canJoinNow(player)) {
+                    return;
+                }
+                if (dirty) {
+                    rejectJoinDirtyInventory(player);
+                    return;
+                }
+                finishJoin(player);
+            });
+        }, null);
+        return true;
+    }
+
+    /** 入队前置：阶段必须允许加入（IDLE / PREPARING）。返回 false 时已给出提示。 */
+    private boolean canJoinNow(Player player) {
+        if (phase != GamePhase.IDLE && phase != GamePhase.PREPARING) {
+            alerts.sendTo(player, "game-already-running", Map.of());
             return false;
         }
+        return true;
+    }
 
+    /** 背包非空时的拒绝路径：只打日志与提示，不改任何对局状态。 */
+    private void rejectJoinDirtyInventory(Player player) {
+        debug("玩家 " + player.getName() + " 入队被拒：背包未清空");
+        alerts.sendTo(player, "queue-inventory-not-empty", Map.of());
+    }
+
+    /**
+     * 真正入队：取消在跑的准备倒计时、登记队列、传送并挂记分板。
+     *
+     * <p><b>必须在权威线程上调用</b>——它会改 {@code queue} / {@code timer} / {@code phase}。
+     * Paper 上它仍是在点击事件里同步跑完的，与改造前一致。</p>
+     */
+    private void finishJoin(Player player) {
         // 需求：准备倒计时期间也允许加入队列——新玩家进入意味着“有人进入准备房间”，
         // 此时应当取消倒计时并重置准备进度，而不是把大厅里的人挡在门外。
         if (phase == GamePhase.PREPARING) {
@@ -770,7 +908,7 @@ public final class GameEngine {
         UUID uuid = player.getUniqueId();
         if (queue.contains(uuid)) {
             alerts.sendTo(player, "queue-already-joined", Map.of());
-            return false;
+            return;
         }
         queue.add(uuid);
         // 需求：准备房间的领地常态关闭传送权限。传送本身走 teleport()，
@@ -786,24 +924,30 @@ public final class GameEngine {
         // 届时必须把刚刚入队的玩家摘掉，否则会出现“人在大厅、队列里却有人”的幽灵状态，
         // 准备房间人数判定会被它拉到 2 人从而启动倒计时。
         teleportAsyncWithResult(player, config.settings().location("prep-spawn").toLocation())
-                .whenComplete((ok, error) -> Bukkit.getScheduler().runTask(plugin, () -> {
+                .whenComplete((ok, error) -> {
                     if (error == null && Boolean.TRUE.equals(ok)) {
                         return;
                     }
-                    // 玩家可能在等待期间自己又退了队/下线，只有仍在队列中才回滚
-                    if (!queue.remove(uuid)) {
-                        return;
-                    }
-                    scoreboard.detach(player);
-                    Player online = Bukkit.getPlayer(uuid);
-                    String name = online == null ? player.getName() : online.getName();
-                    debug("玩家 " + name + " 入队传送失败（被领地/插件拦截或取消），已从队列移除");
-                    if (online != null) {
-                        alerts.sendTo(online, "queue-teleport-failed", Map.of());
-                    }
-                    alerts.broadcast("queue-leave", Map.of("player", name));
-                }));
-        return true;
+                    // 这个回调在 Folia 上跑在“玩家所属区域线程”，而 queue 的状态机
+                    // 只允许权威线程改，因此先回权威线程再做共享状态的改动
+                    schedulers.onMain(() -> {
+                        // 玩家可能在等待期间自己又退了队/下线，只有仍在队列中才回滚
+                        if (!queue.remove(uuid)) {
+                            return;
+                        }
+                        Player online = Bukkit.getPlayer(uuid);
+                        String name = online == null ? player.getName() : online.getName();
+                        debug("玩家 " + name + " 入队传送失败（被领地/插件拦截或取消），已从队列移除");
+                        // 记分板与私发提示属于“玩家自身状态”，交回该玩家所属线程
+                        if (online != null) {
+                            schedulers.onEntity(online, () -> {
+                                scoreboard.detach(online);
+                                alerts.sendTo(online, "queue-teleport-failed", Map.of());
+                            }, null);
+                        }
+                        alerts.broadcast("queue-leave", Map.of("player", name));
+                    });
+                });
     }
 
     /**
@@ -879,6 +1023,10 @@ public final class GameEngine {
      * @return 实际参战人数
      */
     public int prepareFromQueue() {
+        // 指令入口：开局会改 members/phase/timer，必须先回到权威线程
+        if (!schedulers.guardAuthoritative(this::prepareFromQueue)) {
+            return 0;
+        }
         if (phase != GamePhase.IDLE) {
             return 0;
         }
@@ -970,8 +1118,9 @@ public final class GameEngine {
                 plugin.getLogger().info("已生成 " + spawned + " 个附魔战争商店 NPC");
             }
         }
-        plugin.getLogger().info("对局开始：参战 " + participants.size() + " 人，"
-                + "分散落点 " + lastDisperseReport);
+        // 分散结果由 disperseOne 的收尾单独打一行：Folia 上分散可能跨若干 tick 才完成，
+        // 不能再像以前那样把结果拼进这条日志里（那时会打到“进行中”的旧值）
+        plugin.getLogger().info("对局开始：参战 " + participants.size() + " 人");
     }
 
     /**
@@ -1000,38 +1149,42 @@ public final class GameEngine {
      */
     private void applyStartState(Player player) {
         Settings settings = config.settings();
-        // 需求：开局把场内玩家（队伍 fm）改成生存模式
-        player.setGameMode(GameMode.SURVIVAL);
-        if (settings.start().clearInventory()) {
-            // 只清物品：经验值（等级/经验条/总经验）不在这里，也不该在这里被顺手清掉
-            player.getInventory().clear();
-            player.setItemOnCursor(null);
-        }
-        if (settings.start().clearEffects()) {
-            for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
-                player.removePotionEffect(effect.getType());
+        // 整段都是“玩家自身状态”（游戏模式、背包、药水、血量、饥饿）：派发到该玩家所属线程。
+        // Paper 上就地执行，时序与改造前一致；Folia 上才真正落到该玩家的区域线程。
+        schedulers.runOwned(player, () -> {
+            // 需求：开局把场内玩家（队伍 fm）改成生存模式
+            player.setGameMode(GameMode.SURVIVAL);
+            if (settings.start().clearInventory()) {
+                // 只清物品：经验值（等级/经验条/总经验）不在这里，也不该在这里被顺手清掉
+                player.getInventory().clear();
+                player.setItemOnCursor(null);
             }
-        }
-        if (settings.start().resistanceEnabled()) {
-            player.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE,
-                    (int) settings.start().resistanceDurationTicks(),
-                    settings.start().resistanceAmplifier(), true, false));
-        }
-        if (settings.start().heal()) {
-            player.setHealth(player.getAttribute(Attribute.MAX_HEALTH) == null
-                    ? 20.0
-                    : player.getAttribute(Attribute.MAX_HEALTH).getValue());
-            player.setFoodLevel(20);
-            player.setSaturation(20.0F);
-        }
-        Settings.FishingRod rod = settings.start().fishingRod();
-        if (rod.usable()) {
-            ItemStack item = buildRod(rod);
-            if (item != null) {
-                player.getInventory().addItem(item);
+            if (settings.start().clearEffects()) {
+                for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
+                    player.removePotionEffect(effect.getType());
+                }
             }
-        }
-        player.updateInventory();
+            if (settings.start().resistanceEnabled()) {
+                player.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE,
+                        (int) settings.start().resistanceDurationTicks(),
+                        settings.start().resistanceAmplifier(), true, false));
+            }
+            if (settings.start().heal()) {
+                player.setHealth(player.getAttribute(Attribute.MAX_HEALTH) == null
+                        ? 20.0
+                        : player.getAttribute(Attribute.MAX_HEALTH).getValue());
+                player.setFoodLevel(20);
+                player.setSaturation(20.0F);
+            }
+            Settings.FishingRod rod = settings.start().fishingRod();
+            if (rod.usable()) {
+                ItemStack item = buildRod(rod);
+                if (item != null) {
+                    player.getInventory().addItem(item);
+                }
+            }
+            player.updateInventory();
+        }, null);
     }
 
     /** 按配置构造钓竿；材质无法识别时返回 null（调用方跳过发放）。 */
@@ -1133,6 +1286,186 @@ public final class GameEngine {
     // 开局分散与决斗圈
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // 落点采样（按“列”派发到区块区域线程）
+    // ------------------------------------------------------------------
+
+    /** 在单个 x/z 列上求一个落点。实现由调用方给（最高可落脚面 / 锁定高度）。 */
+    @FunctionalInterface
+    private interface ColumnSampler {
+        Location sampleAt(World world, double x, double z);
+    }
+
+    /**
+     * 在单个 x/z 列上求一个落点，并把结果交回权威线程。
+     *
+     * <p><b>这一层是本插件适配 Folia 的关键取舍。</b>{@link SafeLocation} 的
+     * {@code find} / {@code exact} 只读写同一个 x/z 列上的方块，而一列必然完整落在
+     * <b>同一个区块</b>里，于是它可以被整体派发到“拥有那个区块的区域线程”上执行。
+     * 反过来，分散半径 100 格的正方形、乃至整个决斗圈，都会横跨多个区块、多个区域——
+     * <b>没有任何一个线程能合法地把它们一次读完</b>，改造前那种“一个同步循环扫完
+     * 整片地形”的写法在 Folia 上是不成立的。</p>
+     *
+     * <p>因此采样被拆成“每个候选列一次派发 + 结果回到权威线程”，由
+     * {@link #sampleSquareAsync} / {@link #sampleRegionAsync} 负责把候选列串起来。
+     * Paper 上当前线程本就是该区块的归属线程，采样就地同步完成，整条链仍在同一 tick
+     * 内跑完，与改造前等价。</p>
+     *
+     * @param callback 结果回调，<b>保证在权威线程上执行</b>；找不到落点时传 null
+     */
+    private void sampleColumn(World world, double x, double z, ColumnSampler sampler,
+                              Consumer<Location> callback) {
+        int blockX = (int) Math.floor(x);
+        int blockZ = (int) Math.floor(z);
+        int chunkX = blockX >> 4;
+        int chunkZ = blockZ >> 4;
+        if (schedulers.owns(world, chunkX, chunkZ)) {
+            // Paper（或已经在该区块的线程上）：就地采样，当前 tick 就出结果
+            callback.accept(sampler.sampleAt(world, x, z));
+            return;
+        }
+        // 从未生成过的区块里不可能有落点，也不该为了求落点去生成地形
+        if (!world.isChunkGenerated(chunkX, chunkZ)) {
+            callback.accept(null);
+            return;
+        }
+        world.getChunkAtAsync(chunkX, chunkZ, false).whenComplete((chunk, error) ->
+                schedulers.onRegion(world, chunkX, chunkZ, () -> {
+                    Location found = (error != null || chunk == null || !chunk.isLoaded())
+                            ? null
+                            : sampler.sampleAt(world, x, z);
+                    // 采样结果一律回到权威线程再交给调用方：调用方要在那里改“已选落点”列表
+                    schedulers.onMain(() -> callback.accept(found));
+                }));
+    }
+
+    /**
+     * 候选落点是否可用：非空、落在指定区域内（带 y 的复核），且与已选落点保持最小间距。
+     *
+     * <p>“采到之后再复核一次区域”是必要的：地形落差可能让实际落脚点偏出边界。
+     * {@code within} 为 null 时不检查区域。只允许在权威线程调用（会读 {@code taken}）。</p>
+     */
+    private boolean acceptLanding(Location candidate, Region within, List<Location> taken, double minSpacing) {
+        if (candidate == null) {
+            return false;
+        }
+        if (within != null && !within.contains(candidate)) {
+            return false;
+        }
+        for (Location other : taken) {
+            if (other.getWorld() != candidate.getWorld()) {
+                continue;
+            }
+            double dx = other.getX() - candidate.getX();
+            double dz = other.getZ() - candidate.getZ();
+            if (Math.sqrt(dx * dx + dz * dz) < minSpacing) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 正方形采样（{@code SafeLocation.sampleSquare} 的异步版）。
+     *
+     * <p>判定与原实现逐条对应：候选点先按<b>水平</b>判定落在 {@code within} 内，
+     * 采到落点后再用带 y 的 {@code contains} 复核一次，最后检查最小间距。</p>
+     *
+     * <p>同一次调用内，只要候选列就落在当前区块上就继续<b>循环</b>（Paper 上即整段同步）；
+     * 一旦某个候选列属于别的区域，就派发出去、并在它失败时带着剩余次数重新进入本方法。</p>
+     *
+     * @param attemptsLeft 还剩几次尝试机会
+     */
+    private void sampleSquareAsync(World world, Settings.Disperse disperse, Region within,
+                                   double referenceY, List<Location> taken, int attemptsLeft,
+                                   Consumer<Location> callback) {
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        for (int attempt = 0; attempt < attemptsLeft; attempt++) {
+            double x = disperse.centerX() + random.nextDouble(-disperse.radius(), disperse.radius());
+            double z = disperse.centerZ() + random.nextDouble(-disperse.radius(), disperse.radius());
+            // 必须用只判水平的 containsXZ：候选点的 y 此刻未知，用带 y 的判定传占位值
+            // （例如 0）会把所有候选点判成区域外，分散会 100% 失败
+            if (within != null && !within.containsXZ(world.getName(), x, z)) {
+                continue;
+            }
+            int chunkX = (int) Math.floor(x) >> 4;
+            int chunkZ = (int) Math.floor(z) >> 4;
+            ColumnSampler sampler = (w, bx, bz) -> SafeLocation.find(w, bx, bz, referenceY);
+            if (schedulers.owns(world, chunkX, chunkZ)) {
+                Location candidate = sampler.sampleAt(world, x, z);
+                if (acceptLanding(candidate, within, taken, disperse.minSpacing())) {
+                    callback.accept(candidate);
+                    return;
+                }
+                continue;
+            }
+            int remaining = attemptsLeft - attempt - 1;
+            sampleColumn(world, x, z, sampler, candidate -> {
+                if (acceptLanding(candidate, within, taken, disperse.minSpacing())) {
+                    callback.accept(candidate);
+                    return;
+                }
+                sampleSquareAsync(world, disperse, within, referenceY, taken, remaining, callback);
+            });
+            return;
+        }
+        callback.accept(null);
+    }
+
+    /**
+     * 决斗圈采样（{@code SafeLocation.sampleRegion} / {@code sampleRegionExactY} 的异步版）。
+     *
+     * <p>取点方式与原实现一致：在区域的<b>整个水平范围</b>内随机取点，而不是
+     * “中心 ± 半径”的正方形——决斗圈多为长方形，正方形采样会有死角且容易越界。</p>
+     *
+     * @param exactY    true 表示锁定高度（完全不看地形），此时 {@code exactOrReferenceY} 是落点脚部高度
+     * @param maxY      非锁定模式下的落点高度上限（&gt; 0 生效）
+     * @param allowWater 是否允许落在水面上
+     */
+    private void sampleRegionAsync(World world, Region region, boolean exactY, double exactOrReferenceY,
+                                   double maxY, boolean allowWater, double minSpacing, int maxAttempts,
+                                   List<Location> taken, Consumer<Location> callback) {
+        if (world == null || region == null) {
+            callback.accept(null);
+            return;
+        }
+        // 区域内取点要含边界：+1 让 maxX/maxZ 那一格也能被抽到
+        double widthX = Math.max(1.0, region.maxX() - region.minX() + 1);
+        double widthZ = Math.max(1.0, region.maxZ() - region.minZ() + 1);
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            double x = region.minX() + random.nextDouble(widthX);
+            double z = region.minZ() + random.nextDouble(widthZ);
+            if (!region.containsXZ(world.getName(), x, z)) {
+                continue;
+            }
+            int chunkX = (int) Math.floor(x) >> 4;
+            int chunkZ = (int) Math.floor(z) >> 4;
+            ColumnSampler sampler = exactY
+                    ? (w, bx, bz) -> SafeLocation.exact(w, bx, exactOrReferenceY, bz)
+                    : (w, bx, bz) -> SafeLocation.find(w, bx, bz, exactOrReferenceY, maxY, allowWater);
+            if (schedulers.owns(world, chunkX, chunkZ)) {
+                Location candidate = sampler.sampleAt(world, x, z);
+                if (acceptLanding(candidate, region, taken, minSpacing)) {
+                    callback.accept(candidate);
+                    return;
+                }
+                continue;
+            }
+            int remaining = maxAttempts - attempt - 1;
+            sampleColumn(world, x, z, sampler, candidate -> {
+                if (acceptLanding(candidate, region, taken, minSpacing)) {
+                    callback.accept(candidate);
+                    return;
+                }
+                sampleRegionAsync(world, region, exactY, exactOrReferenceY, maxY, allowWater,
+                        minSpacing, remaining, taken, callback);
+            });
+            return;
+        }
+        callback.accept(null);
+    }
+
     /**
      * 开局分散。
      *
@@ -1156,49 +1489,50 @@ public final class GameEngine {
         // 此时 SafeLocation 会自行从世界最高点向下找，行为与之前一致
         double referenceY = disperse.centerY();
         List<Location> taken = new ArrayList<>();
-        int fallback = 0;
-        for (int index = 0; index < participants.size(); index++) {
-            final Player player = participants.get(index);
-            final int slot = index;
-            Location sample = SafeLocation.sampleSquare(world, disperse.centerX(), disperse.centerZ(),
-                    disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(),
-                    taken, arena, referenceY);
+        AtomicInteger fallback = new AtomicInteger();
+        disperseOne(participants, 0, taken, fallback, settings, disperse, arena, referenceY);
+    }
+
+    /**
+     * 逐个玩家求分散落点。
+     *
+     * <p><b>必须串行</b>：最小间距是相对“已选落点”判定的，并发求点会让两名玩家互相
+     * 看不到对方的落点，间距约束直接失效。因此这里是“求完一个再求下一个”的链。</p>
+     *
+     * <p>Paper 上每个 {@link #sampleColumn} 都就地完成，整条链在同一 tick 内跑完，
+     * 与改造前的同步循环等价；Folia 上跨区域的候选列会让链跨若干 tick 继续。</p>
+     */
+    private void disperseOne(List<Player> participants, int index, List<Location> taken,
+                             AtomicInteger fallback, Settings settings, Settings.Disperse disperse,
+                             Region arena, double referenceY) {
+        if (index >= participants.size()) {
+            lastDisperseReport = taken.size() + "/" + participants.size() + " 人成功分散"
+                    + "（中心 " + (long) disperse.centerX() + "," + (long) disperse.centerZ()
+                    + " 正方形半边长 " + (long) disperse.radius()
+                    + "，最小间距 " + (long) disperse.minSpacing()
+                    + (fallback.get() > 0 ? "，" + fallback.get() + " 人走兜底点" : "") + "）";
+            plugin.getLogger().info("分散完成：" + lastDisperseReport);
+            return;
+        }
+        final Player player = participants.get(index);
+        sampleSquareAsync(world, disperse, arena, referenceY, taken, disperse.maxAttempts(), sample -> {
             if (sample != null) {
                 taken.add(sample);
                 teleport(player, levelView(player, sample));
-                continue;
+                // 落点由 SafeLocation 采样得出，本身就保证是“该列最高可落脚面”；
+                // 这里只记录最终落点。改造前还会额外读一次该列最高方块 y 做交叉验证，
+                // 但那是一次跨区块读，在 Folia 上正是不能做的事，故去掉。
+                debug("分散落点 " + player.getName() + " -> "
+                        + sample.getBlockX() + "," + sample.getBlockY() + "," + sample.getBlockZ());
+            } else {
+                fallback.incrementAndGet();
+                plugin.getLogger().warning("玩家 " + player.getName() + " 未能找到分散落点（槽位 " + index
+                        + "），已退回场地传送点。请检查 regions.arena 是否覆盖分散范围、"
+                        + "以及该范围内是否有可站立地面");
+                teleport(player, levelView(player, settings.location("arena-spawn")));
             }
-            // 找不到合格点：异步加载该区块后再试一次，仍失败则退回场地传送点
-            fallback++;
-            int chunkX = (int) Math.floor(disperse.centerX()) >> 4;
-            int chunkZ = (int) Math.floor(disperse.centerZ()) >> 4;
-            world.getChunkAtAsync(chunkX, chunkZ).thenAccept(chunk -> Bukkit.getScheduler().runTask(plugin, () -> {
-                Location retry = SafeLocation.sampleSquare(world, disperse.centerX(), disperse.centerZ(),
-                        disperse.radius(), disperse.minSpacing(), disperse.maxAttempts(),
-                        taken, arena, referenceY);
-                if (retry != null) {
-                    taken.add(retry);
-                    teleport(player, levelView(player, retry));
-                } else {
-                    plugin.getLogger().warning("玩家 " + player.getName() + " 未能找到分散落点（槽位 " + slot
-                            + "），已退回场地传送点。请检查 regions.arena 是否覆盖分散范围、"
-                            + "以及该范围内是否有可站立地面");
-                    teleport(player, levelView(player, settings.location("arena-spawn")));
-                }
-            }));
-        }
-        lastDisperseReport = taken.size() + "/" + participants.size() + " 人成功分散"
-                + "（中心 " + (long) disperse.centerX() + "," + (long) disperse.centerZ()
-                + " 正方形半边长 " + (long) disperse.radius()
-                + "，最小间距 " + (long) disperse.minSpacing()
-                + (fallback > 0 ? "，" + fallback + " 人走异步重试" : "") + "）";
-        // 逐人记录落点：确认落的是“该位置最高可落脚点”而不是房子内部
-        for (Player player : participants) {
-            Location at = player.getLocation();
-            debug("分散落点 " + player.getName() + " -> "
-                    + at.getBlockX() + "," + at.getBlockY() + "," + at.getBlockZ()
-                    + "（最高方块 y=" + world.getHighestBlockYAt(at.getBlockX(), at.getBlockZ()) + "）");
-        }
+            disperseOne(participants, index + 1, taken, fallback, settings, disperse, arena, referenceY);
+        });
     }
 
     /**
@@ -1242,63 +1576,93 @@ public final class GameEngine {
                                 + "，允许水面 " + arena.allowWater())
                 + "）");
 
-        // 兜底落点：两种模式各自取自己的“中心点安全位”
-        Location fallback = exactY
-                ? SafeLocation.exact(target, arena.centerX(), arena.centerY(), arena.centerZ())
-                : SafeLocation.find(target, arena.centerX(), arena.centerZ(),
-                        arena.centerY(), effectiveMaxY, arena.allowWater());
-        if (fallback == null) {
-            fallback = new Location(target, arena.centerX() + 0.5,
-                    Math.max(duelRegion.minY() + 1, arena.centerY()), arena.centerZ() + 0.5);
-        }
-
+        // 名单在权威线程上一次性取好：后面的异步链只处理这份快照，不再反复遍历队伍
+        List<Player> membersToPlace = new ArrayList<>(onlineMembers());
+        List<Player> spectatorsToPlace = new ArrayList<>(onlineSpectators());
         List<Location> taken = new ArrayList<>();
-        int fallbackCount = 0;
-        for (Player player : onlineMembers()) {
-            // 在**该区域的整个范围**内取点，而不是“中心 ± 半径”的正方形：
-            // 决斗圈区域多为长方形，正方形采样会有死角且容易越界。
-            // 锁定高度模式下完全不看地形，直接把高度钉在配置值上。
-            Location sample = exactY
-                    ? SafeLocation.sampleRegionExactY(target, duelRegion, arena.centerY(),
-                            arena.minSpacing(), arena.maxAttempts(), taken)
-                    : SafeLocation.sampleRegion(target, duelRegion,
-                            arena.minSpacing(), arena.maxAttempts(), taken,
-                            arena.centerY(), effectiveMaxY, arena.allowWater());
-            if (sample == null) {
-                fallbackCount++;
-                teleport(player, levelView(player, fallback));
-                alerts.sendActionBarTo(player, "duel-teleport", Map.of());
+        AtomicInteger fallbackCount = new AtomicInteger();
+
+        // 兜底落点本身也要读地形（非锁定模式要搜最高可落脚面，锁定模式要判细雪），
+        // 因此它同样得走按列派发；拿到之后再开始逐个安排玩家。
+        ColumnSampler fallbackSampler = exactY
+                ? (w, bx, bz) -> SafeLocation.exact(w, bx, arena.centerY(), bz)
+                : (w, bx, bz) -> SafeLocation.find(w, bx, bz, arena.centerY(), effectiveMaxY,
+                        arena.allowWater());
+        sampleColumn(target, arena.centerX(), arena.centerZ(), fallbackSampler, sampled -> {
+            Location fallback = sampled;
+            if (fallback == null) {
+                // 中心点也采不到（例如整片是水/岩浆）：退回纯坐标兜底，保证流程不中断
+                fallback = new Location(target, arena.centerX() + 0.5,
+                        Math.max(duelRegion.minY() + 1, arena.centerY()), arena.centerZ() + 0.5);
+            }
+            duelTeleportOne(target, arena, duelRegion, exactY, effectiveMaxY, fallback, taken,
+                    membersToPlace, spectatorsToPlace, 0, fallbackCount);
+        });
+    }
+
+    /**
+     * 逐个把存活玩家送进本局选定的决斗圈。
+     *
+     * <p>与开局分散同一条串行链，原因也相同：落点最小间距是相对“已选落点”判定的。</p>
+     *
+     * <p>Paper 上整条链在同一 tick 内跑完，与改造前的同步循环等价。</p>
+     */
+    private void duelTeleportOne(World target, Settings.DuelArena arena, Region duelRegion,
+                                 boolean exactY, double maxY, Location fallback, List<Location> taken,
+                                 List<Player> members, List<Player> spectators, int index,
+                                 AtomicInteger fallbackCount) {
+        if (index >= members.size()) {
+            teleportSpectatorsToDuel(fallback, spectators);
+            if (fallbackCount.get() > 0) {
+                plugin.getLogger().warning("决斗圈：" + fallbackCount.get() + " 名玩家未能采样到落点，"
+                        + "已使用兜底点（" + fallback.getBlockX() + "," + fallback.getBlockY() + ","
+                        + fallback.getBlockZ() + "）。请检查 regions." + arena.region()
+                        + (exactY ? " 与 center 的 y" : " 与 max-y"));
+            }
+            return;
+        }
+        Player player = members.get(index);
+        // 在**该区域的整个范围**内取点，而不是“中心 ± 半径”的正方形：
+        // 决斗圈区域多为长方形，正方形采样会有死角且容易越界。
+        // 锁定高度模式下完全不看地形，直接把高度钉在配置值上。
+        sampleRegionAsync(target, duelRegion, exactY, arena.centerY(), maxY, arena.allowWater(),
+                arena.minSpacing(), arena.maxAttempts(), taken, sample -> {
+                    if (sample != null) {
+                        taken.add(sample);
+                        teleport(player, levelView(player, sample));
+                    } else {
+                        fallbackCount.incrementAndGet();
+                        teleport(player, levelView(player, fallback));
+                    }
+                    alerts.sendActionBarTo(player, "duel-teleport", Map.of());
+                    duelTeleportOne(target, arena, duelRegion, exactY, maxY, fallback, taken,
+                            members, spectators, index + 1, fallbackCount);
+                });
+    }
+
+    /**
+     * 观战者一并送进本局选定的那个决斗圈，直接落在圈中心的安全位。
+     *
+     * <p>不参与落点采样——旁观模式没有碰撞体积，多人重叠没有影响，集中在中心反而能看清对决。
+     * 决斗圈区域本就落在 arena 之内，因此这里不会触发 {@code checkArenaPresence} 里的
+     * “观战者离场”，但仍登记宽限窗口，避免异步传送落地前的几 tick 被误判。</p>
+     */
+    private void teleportSpectatorsToDuel(Location fallback, List<Player> spectators) {
+        int count = 0;
+        for (Player spectator : spectators) {
+            if (!spectator.isOnline()) {
                 continue;
             }
-            taken.add(sample);
-            teleport(player, levelView(player, sample));
-            alerts.sendActionBarTo(player, "duel-teleport", Map.of());
-        }
-
-        // 观战者一并送进本局选定的那个决斗圈，直接落在圈中心的安全位（fallback）：
-        // 不参与落点采样——旁观模式没有碰撞体积，多人重叠没有影响，
-        // 集中在中心反而能看清对决。决斗圈区域本就落在 arena 之内，
-        // 因此这里不会触发 checkArenaPresence 里的“观战者离场”，
-        // 但仍登记宽限窗口，避免异步传送落地前的几 tick 被误判。
-        int spectators = 0;
-        for (Player spectator : onlineSpectators()) {
             spectatorGrace.put(spectator.getUniqueId(),
                     Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
             teleport(spectator, levelView(spectator, fallback));
             alerts.sendActionBarTo(spectator, "duel-teleport", Map.of());
-            spectators++;
+            count++;
         }
-        if (spectators > 0) {
-            debug("决斗圈：已把 " + spectators + " 名观战者传送到圈中心点（"
+        if (count > 0) {
+            debug("决斗圈：已把 " + count + " 名观战者传送到圈中心点（"
                     + fallback.getBlockX() + "," + fallback.getBlockY() + ","
                     + fallback.getBlockZ() + "）");
-        }
-
-        if (fallbackCount > 0) {
-            plugin.getLogger().warning("决斗圈：" + fallbackCount + " 名玩家未能采样到落点，"
-                    + "已使用兜底点（" + fallback.getBlockX() + "," + fallback.getBlockY() + ","
-                    + fallback.getBlockZ() + "）。请检查 regions." + arena.region()
-                    + (exactY ? " 与 center 的 y" : " 与 max-y"));
         }
     }
 
@@ -1340,97 +1704,153 @@ public final class GameEngine {
             plugin.getLogger().warning("奖励箱内容行为空（chests.loot-groups），不会生成任何奖励箱");
             return;
         }
-        boolean booksOnly = config.settings().start().lootBooksOnly();
-        ThreadLocalRandom random = ThreadLocalRandom.current();
-        int placed = 0;
-        int totalItems = 0;
-        for (Position position : loot.chestLocations()) {
+        List<Position> positions = loot.chestLocations();
+        int total = positions.size();
+        // 计数器用原子类型：实际放箱子的方块读写可能被派发到各区块所属的区域线程
+        AtomicInteger placed = new AtomicInteger();
+        AtomicInteger totalItems = new AtomicInteger();
+        // 每个坐标都必须在处理完（含跳过）后归还一份，归零时打汇总日志。
+        // Paper 上全部就地执行，因此这段日志出现的时机与改造前完全一致。
+        AtomicInteger remaining = new AtomicInteger(total);
+        int deferred = 0;
+        for (Position position : positions) {
             Location location = position.toLocation();
             if (location == null || location.getWorld() == null) {
                 plugin.getLogger().warning("奖励箱坐标世界未加载: " + position.world());
+                reportChestsDone(remaining, placed, totalItems, total);
                 continue;
             }
             World target = location.getWorld();
-            // 先确保区块已加载：未加载时 getState() 拿不到真正的方块实体，
-            // 置物会“看起来成功”但内容丢失（官方示例同样是先 loadChunk 再取箱子）
             int chunkX = location.getBlockX() >> 4;
             int chunkZ = location.getBlockZ() >> 4;
-            if (!target.isChunkLoaded(chunkX, chunkZ)) {
-                target.loadChunk(chunkX, chunkZ);
-            }
-
-            Block block = location.getBlock();
-            // 只覆盖空气或可替换方块：避免把别人放的建筑直接抹掉，同时保留已有的箱子（只填内容）
-            if (block.getType() != Material.CHEST && !block.isReplaceable()) {
-                plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
-                        + " 被 " + block.getType() + " 占用且不可替换，已跳过");
+            if (target.isChunkLoaded(chunkX, chunkZ)) {
+                // 已加载：就地放。Paper 上就在当前 tick，行为与改造前逐字一致。
+                placeChest(position, placed, totalItems);
+                reportChestsDone(remaining, placed, totalItems, total);
                 continue;
             }
-            if (block.getType() != Material.CHEST) {
-                block.setType(Material.CHEST, false);
-                // setType 之后重新取一次方块引用，确保拿到新建的方块实体
-                block = location.getBlock();
-            }
-            // 用**活的方块实体**（useSnapshot=false）而不是快照：
-            // 快照的改动必须靠 update() 写回，中间任何一步出错内容就丢了；
-            // 活体直接操作 chunk 里的方块实体，且能正确处理双箱（getInventory 返回整个双箱）
-            BlockState state = block.getState(false);
-            if (!(state instanceof Chest chest)) {
-                plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
-                        + " 无法取得箱子方块实体（区块是否已加载？），已跳过");
-                continue;
-            }
-            Inventory inventory = chest.getBlockInventory();
-
-            // 先清空再写入，而不是只覆盖前 N 格。
-            // loot-groups 的一行通常只有 1~2 件，箱子却有 27 格：只靠 setItem 覆盖，
-            // 上一局没被玩家取走的物品会原样留在后面的槽位里，看起来就是"箱子里还有
-            // 上一局的物品"。同样地，只要上一局的清箱因任何原因没生效
-            // （区块未加载、方块被替换、进程异常中止），这里也一定能兜住。
-            inventory.clear();
-
-            List<String> group = loot.lootGroups().get(random.nextInt(loot.lootGroups().size()));
-            List<ItemStack> items = plugin.lootParser().parseGroup(group, booksOnly);
-            if (items.isEmpty()) {
-                plugin.getLogger().warning("奖励箱内容行解析后为空，该箱未放入任何物品：" + group
-                        + " —— 多半是附魔键在本服未注册，可用 /fmwar doctor 查看");
-            }
-            for (int slot = 0; slot < items.size() && slot < inventory.getSize(); slot++) {
-                ItemStack item = items.get(slot);
-                if (item == null || item.getType().isAir()) {
-                    continue;
-                }
-                if (booksOnly && item.getType() == Material.ENCHANTED_BOOK) {
-                    ItemMeta meta = item.getItemMeta();
-                    if (meta != null) {
-                        meta.displayName(
-                                Component.translatable("item.minecraft.enchanted_book")
-                                        .decoration(TextDecoration.ITALIC, false)  // 自定义名默认斜体，这里去掉
-                        );
-                        item.setItemMeta(meta);
-                    }
-                }
-                inventory.setItem(slot, item);
-            }
-            // 活体写入后仍需 update() 通知客户端刷新方块实体视图
-            boolean updated = chest.update(true);
-            // 读回校验：直接看同一份活体 inventory，确认内容确实进去了
-            int readBack = countItems(inventory.getContents());
-            if (readBack != items.size()) {
-                plugin.getLogger().warning("奖励箱写入校验失败：期望 " + items.size()
-                        + " 件，读回 " + readBack + " 件（坐标 "
-                        + position.x() + "," + position.y() + "," + position.z()
-                        + "，update 返回 " + updated + "。请把这条日志发给开发者）");
-            }
-
-            chests.add(block.getLocation());
-            placed++;
-            totalItems += items.size();
+            // 未加载：先异步加载区块，再回到该区块所属的区域线程里放。
+            // 改造前这里是同步的 loadChunk + 方块读写，在 Folia 上全局线程做不了这件事。
+            // generate=true 与原先 loadChunk 的语义一致：坐标本来就该有区块。
+            deferred++;
+            target.getChunkAtAsync(chunkX, chunkZ, true).whenComplete((chunk, error) ->
+                    schedulers.onMain(() -> {
+                        if (error != null || chunk == null) {
+                            plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y()
+                                    + "," + position.z() + " 所在区块加载失败，已跳过");
+                        } else {
+                            schedulers.runOwned(target, chunkX, chunkZ,
+                                    () -> placeChest(position, placed, totalItems));
+                        }
+                        reportChestsDone(remaining, placed, totalItems, total);
+                    }));
         }
-        plugin.getLogger().info("奖励箱：已生成 " + placed + "/" + loot.chestLocations().size()
-                + " 个，共放入 " + totalItems + " 件"
-                + (booksOnly ? "附魔书" : "物品"));
-        debug("奖励箱明细：" + describeChests());
+        if (deferred > 0) {
+            debug("奖励箱：" + deferred + " 个坐标所在区块未加载，已转为异步加载后生成");
+        }
+    }
+
+    /** 一个奖励箱处理完毕（含跳过）时归还额度；全部处理完再打汇总日志。 */
+    private void reportChestsDone(AtomicInteger remaining, AtomicInteger placed,
+                                  AtomicInteger totalItems, int total) {
+        if (remaining.decrementAndGet() != 0) {
+            return;
+        }
+        plugin.getLogger().info("奖励箱：已生成 " + placed.get() + "/" + total
+                + " 个，共放入 " + totalItems.get() + " 件"
+                + (config.settings().start().lootBooksOnly() ? "附魔书" : "物品"));
+    }
+
+    /**
+     * 在配置坐标放置一个奖励箱并按 {@code loot-groups} 随机取一行填进去。
+     *
+     * <p><b>必须在拥有该区块的线程上调用</b>：它会读方块、必要时新建箱子并写方块实体，
+     * 全是区块内的世界操作。带完整诊断日志——箱子是否放上、用了哪一行、解析出几件物品、
+     * 失败在哪一步，都写进控制台。</p>
+     */
+    private void placeChest(Position position, AtomicInteger placed, AtomicInteger totalItems) {
+        Location location = position.toLocation();
+        if (location == null || location.getWorld() == null) {
+            return;
+        }
+        World target = location.getWorld();
+        Settings.Loot loot = config.settings().loot();
+        boolean booksOnly = config.settings().start().lootBooksOnly();
+        int chunkX = location.getBlockX() >> 4;
+        int chunkZ = location.getBlockZ() >> 4;
+        if (!target.isChunkLoaded(chunkX, chunkZ)) {
+            plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
+                    + " 所在区块未加载，已跳过");
+            return;
+        }
+
+        Block block = location.getBlock();
+        // 只覆盖空气或可替换方块：避免把别人放的建筑直接抹掉，同时保留已有的箱子（只填内容）
+        if (block.getType() != Material.CHEST && !block.isReplaceable()) {
+            plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
+                    + " 被 " + block.getType() + " 占用且不可替换，已跳过");
+            return;
+        }
+        if (block.getType() != Material.CHEST) {
+            block.setType(Material.CHEST, false);
+            // setType 之后重新取一次方块引用，确保拿到新建的方块实体
+            block = location.getBlock();
+        }
+        // 用**活的方块实体**（useSnapshot=false）而不是快照：
+        // 快照的改动必须靠 update() 写回，中间任何一步出错内容就丢了；
+        // 活体直接操作 chunk 里的方块实体，且能正确处理双箱（getInventory 返回整个双箱）
+        BlockState state = block.getState(false);
+        if (!(state instanceof Chest chest)) {
+            plugin.getLogger().warning("奖励箱坐标 " + position.x() + "," + position.y() + "," + position.z()
+                    + " 无法取得箱子方块实体（区块是否已加载？），已跳过");
+            return;
+        }
+        Inventory inventory = chest.getBlockInventory();
+
+        // 先清空再写入，而不是只覆盖前 N 格。
+        // loot-groups 的一行通常只有 1~2 件，箱子却有 27 格：只靠 setItem 覆盖，
+        // 上一局没被玩家取走的物品会原样留在后面的槽位里，看起来就是"箱子里还有
+        // 上一局的物品"。同样地，只要上一局的清箱因任何原因没生效
+        // （区块未加载、方块被替换、进程异常中止），这里也一定能兜住。
+        inventory.clear();
+
+        List<String> group = loot.lootGroups().get(ThreadLocalRandom.current().nextInt(loot.lootGroups().size()));
+        List<ItemStack> items = plugin.lootParser().parseGroup(group, booksOnly);
+        if (items.isEmpty()) {
+            plugin.getLogger().warning("奖励箱内容行解析后为空，该箱未放入任何物品：" + group
+                    + " —— 多半是附魔键在本服未注册，可用 /fmwar doctor 查看");
+        }
+        for (int slot = 0; slot < items.size() && slot < inventory.getSize(); slot++) {
+            ItemStack item = items.get(slot);
+            if (item == null || item.getType().isAir()) {
+                continue;
+            }
+            if (booksOnly && item.getType() == Material.ENCHANTED_BOOK) {
+                ItemMeta meta = item.getItemMeta();
+                if (meta != null) {
+                    meta.displayName(
+                            Component.translatable("item.minecraft.enchanted_book")
+                                    .decoration(TextDecoration.ITALIC, false)  // 自定义名默认斜体，这里去掉
+                    );
+                    item.setItemMeta(meta);
+                }
+            }
+            inventory.setItem(slot, item);
+        }
+        // 活体写入后仍需 update() 通知客户端刷新方块实体视图
+        boolean updated = chest.update(true);
+        // 读回校验：直接看同一份活体 inventory，确认内容确实进去了
+        int readBack = countItems(inventory.getContents());
+        if (readBack != items.size()) {
+            plugin.getLogger().warning("奖励箱写入校验失败：期望 " + items.size()
+                    + " 件，读回 " + readBack + " 件（坐标 "
+                    + position.x() + "," + position.y() + "," + position.z()
+                    + "，update 返回 " + updated + "。请把这条日志发给开发者）");
+        }
+
+        chests.add(block.getLocation());
+        placed.incrementAndGet();
+        totalItems.addAndGet(items.size());
     }
 
     /** 统计非空物品数量。 */
@@ -1442,35 +1862,6 @@ public final class GameEngine {
             }
         }
         return count;
-    }
-
-    /** 逐个箱子列出当前实际内容（读回，不是写入时的记录）。 */
-    public String describeChests() {
-        if (chests.isEmpty()) {
-            return "本次对局没有生成任何奖励箱";
-        }
-        StringBuilder builder = new StringBuilder();
-        for (Location location : chests) {
-            builder.append("\n  ").append(location.getBlockX()).append(',')
-                    .append(location.getBlockY()).append(',').append(location.getBlockZ()).append(" -> ");
-            if (!(location.getBlock().getState(false) instanceof Chest chest)) {
-                builder.append("不是箱子方块");
-                continue;
-            }
-            ItemStack[] contents = chest.getBlockInventory().getContents();
-            int count = countItems(contents);
-            if (count == 0) {
-                builder.append("空");
-                continue;
-            }
-            builder.append(count).append(" 件：");
-            for (ItemStack item : contents) {
-                if (item != null && !item.getType().isAir()) {
-                    builder.append(item.getType().name()).append('x').append(item.getAmount()).append(' ');
-                }
-            }
-        }
-        return builder.toString();
     }
 
     /** 奖励箱坐标列表（供指令读回校验）。 */
@@ -1487,27 +1878,50 @@ public final class GameEngine {
      *
      * <p><b>必须在 {@code chests} 还是满的时候调用。</b>{@link #resetRuntimeState()}
      * 刻意不再清空这个列表——它先于本方法执行，一旦它清了，这里就无事可做。</p>
+     *
+     * <p>方块读写会逐个派发到箱子所在区块的区域线程（Paper 上就地执行）。汇总日志挂在
+     * “全部派发完毕”上，因此 Paper 上的输出与改造前逐字一致。</p>
      */
     private void clearChests() {
-        if (chests.isEmpty()) {
+        // 先取快照再清空清单：清单本身是“待办”，取到就立刻消费掉，避免收尾路径重复进入
+        List<Location> pending = new ArrayList<>(chests);
+        chests.clear();
+        if (pending.isEmpty()) {
             return;
         }
-        int removed = 0;
-        for (Location location : chests) {
-            Block block = location.getBlock();
-            if (block.getType() != Material.CHEST) {
-                continue;// 箱子已被挖走/替换：没有内容留下，但也不计入清理数
-            }
-            // 用活体方块实体（useSnapshot=false）而不是快照：与 spawnChests() 保持一致，
-            // 改动直接落在 chunk 里的方块实体上，不依赖 update() 写回
-            if (block.getState(false) instanceof Container container) {
-                container.getInventory().clear();
-            }
-            block.setType(Material.AIR, false);
-            removed++;
+        AtomicInteger removed = new AtomicInteger();
+        AtomicInteger remaining = new AtomicInteger(pending.size());
+        for (Location location : pending) {
+            schedulers.runOwned(location, () -> {
+                if (removeChestAt(location)) {
+                    removed.incrementAndGet();
+                }
+                if (remaining.decrementAndGet() == 0) {
+                    plugin.getLogger().info("奖励箱：已清空并移除 " + removed.get() + "/" + pending.size() + " 个");
+                }
+            });
         }
-        plugin.getLogger().info("奖励箱：已清空并移除 " + removed + "/" + chests.size() + " 个");
-        chests.clear();
+    }
+
+    /**
+     * 就地清掉一个奖励箱：先清内容再删方块。
+     *
+     * <p><b>必须在拥有该区块的线程上调用</b>（与 {@link #placeChest} 同一约束）。</p>
+     *
+     * @return 是否确实移除了一个箱子；坐标上已经不是箱子时返回 false，且不计入清理数
+     */
+    private boolean removeChestAt(Location location) {
+        Block block = location.getBlock();
+        if (block.getType() != Material.CHEST) {
+            return false;
+        }
+        // 用活体方块实体（useSnapshot=false）而不是快照：与 placeChest() 保持一致，
+        // 改动直接落在 chunk 里的方块实体上，不依赖 update() 写回
+        if (block.getState(false) instanceof Container container) {
+            container.getInventory().clear();
+        }
+        block.setType(Material.AIR, false);
+        return true;
     }
 
     // ------------------------------------------------------------------
@@ -1518,15 +1932,19 @@ public final class GameEngine {
         int amount = Math.max(1, config.settings().emerald().amount());
         ItemStack emerald = new ItemStack(Material.EMERALD, amount);
         for (Player player : onlineMembers()) {
-            player.getInventory().addItem(emerald.clone());
-            player.updateInventory();
+            // 往背包里塞东西是玩家自身状态：逐个派发到该玩家所属线程
+            schedulers.runOwned(player, () -> {
+                player.getInventory().addItem(emerald.clone());
+                player.updateInventory();
+            }, null);
         }
     }
 
     private void applyOvertimeDamage() {
         double damage = config.settings().timing().overtimeDamage();
         for (Player player : onlineMembers()) {
-            player.damage(damage);
+            // 扣血是玩家自身状态：逐个派发到该玩家所属线程
+            schedulers.runOwned(player, () -> player.damage(damage), null);
         }
     }
 
@@ -1616,20 +2034,23 @@ public final class GameEngine {
         if (player == null || !player.isOnline()) {
             return;
         }
-        var maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
-        double full = maxHealth == null ? 20.0 : maxHealth.getValue();
-        // 血量至少要留 1：某些属性插件把 maxHealth 临时压到 0 时 setHealth(0) 会直接弄死玩家
-        player.setHealth(Math.max(1.0, full));
-        player.setFoodLevel(20);
-        player.setSaturation(20.0F);
-        player.setExhaustion(0F);
-        player.setFireTicks(0);
-        player.setFallDistance(0F);
-        player.setRemainingAir(player.getMaximumAir());
-        for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
-            player.removePotionEffect(effect.getType());
-        }
-        player.updateInventory();
+        // 全是玩家自身状态：派发到该玩家所属线程
+        schedulers.runOwned(player, () -> {
+            var maxHealth = player.getAttribute(Attribute.MAX_HEALTH);
+            double full = maxHealth == null ? 20.0 : maxHealth.getValue();
+            // 血量至少要留 1：某些属性插件把 maxHealth 临时压到 0 时 setHealth(0) 会直接弄死玩家
+            player.setHealth(Math.max(1.0, full));
+            player.setFoodLevel(20);
+            player.setSaturation(20.0F);
+            player.setExhaustion(0F);
+            player.setFireTicks(0);
+            player.setFallDistance(0F);
+            player.setRemainingAir(player.getMaximumAir());
+            for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
+                player.removePotionEffect(effect.getType());
+            }
+            player.updateInventory();
+        }, null);
     }
 
     /** 淘汰一名游戏内玩家：清背包、清效果、移出队伍、送回大厅并广播。 */
@@ -1645,6 +2066,10 @@ public final class GameEngine {
      *                        使重生点监听只影响本插件淘汰的玩家）
      */
     public void eliminate(Player player, String messageKey, boolean broadcast, boolean deferredRespawn) {
+        // 淘汰会改 members/待重生名单/队伍，并触发胜负判定：一律在权威线程上做
+        if (!schedulers.guardAuthoritative(() -> eliminate(player, messageKey, broadcast, deferredRespawn))) {
+            return;
+        }
         UUID uuid = player.getUniqueId();
         if (!members.remove(uuid)) {
             return;
@@ -1692,9 +2117,13 @@ public final class GameEngine {
      * 最终落点会被服务器重生点覆盖掉刚刚的大厅传送。</p>
      */
     private void scheduleRespawn(Player player) {
-        Bukkit.getScheduler().runTask(plugin, () -> {
+        UUID uuid = player.getUniqueId();
+        // respawn() 与落点改写都是“玩家自身状态”，必须在该玩家所属线程执行；
+        // PlayerRespawnEvent 也在同一线程同步触发，因此 pendingRespawn 的
+        // 增删读在同一线程上串行（集合本身用并发实现，兼容权威线程的写入）
+        schedulers.onEntity(player, () -> {
             if (!player.isOnline()) {
-                pendingRespawn.remove(player.getUniqueId());
+                pendingRespawn.remove(uuid);
                 return;
             }
             if (player.isDead()) {
@@ -1702,9 +2131,11 @@ public final class GameEngine {
                 // respawn() 内部同步触发的，标记若先被清掉，监听就不会把落点改成大厅
                 player.spigot().respawn();
             }
-            pendingRespawn.remove(player.getUniqueId());
-            teleport(player, config.settings().location("hall-spawn"));
-        });
+            pendingRespawn.remove(uuid);
+            // 传送这一步不能留在玩家线程上：teleport() 会先向领地插件下发 /res 指令，
+            // 而指令必须在权威线程派发。因此交回权威线程（Paper 上本就是同一个线程）。
+            schedulers.onMain(() -> teleport(player, config.settings().location("hall-spawn")));
+        }, () -> pendingRespawn.remove(uuid));
     }
 
     /**
@@ -1715,31 +2146,42 @@ public final class GameEngine {
      */
     private void clearPlayerState(Player player) {
         Settings settings = config.settings();
-        if (settings.start().clearInventory()) {
-            // 只清物品；经验值归玩家自己（死亡路径的保留见 PlayerStateListener 的 keepLevel）
-            player.getInventory().clear();
-            player.setItemOnCursor(null);
-        }
-        if (settings.start().clearEffects()) {
-            for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
-                player.removePotionEffect(effect.getType());
+        // 清背包 / 光标 / 药水效果都是玩家自身状态：派发到该玩家所属线程。
+        // 注意顺序——这里是**离场清理**，不涉及死亡结算，所以延后一 tick 也无副作用。
+        schedulers.runOwned(player, () -> {
+            if (settings.start().clearInventory()) {
+                // 只清物品；经验值归玩家自己（死亡路径的保留见 PlayerStateListener 的 keepLevel）
+                player.getInventory().clear();
+                player.setItemOnCursor(null);
             }
-        }
-        player.updateInventory();
+            if (settings.start().clearEffects()) {
+                for (PotionEffect effect : new ArrayList<>(player.getActivePotionEffects())) {
+                    player.removePotionEffect(effect.getType());
+                }
+            }
+            player.updateInventory();
+        }, null);
     }
 
     /** 观战玩家离场：回大厅 + 生存模式 + 移出队伍。 */
     public void exitSpectator(Player player) {
+        if (!schedulers.guardAuthoritative(() -> exitSpectator(player))) {
+            return;
+        }
         spectatorGrace.remove(player.getUniqueId());
         teams.leaveAll(player.getUniqueId());
         scoreboard.detach(player);
-        player.setGameMode(GameMode.SURVIVAL);
+        setGameMode(player, GameMode.SURVIVAL);
         teleport(player, config.settings().location("hall-spawn"));
         alerts.sendTo(player, "spectator-arena-exit", Map.of());
     }
 
     /** 右键观战按钮。 */
     public boolean trySpectate(Player player) {
+        // 观战会改队伍/宽限窗口/记分板：事件回调可能不在权威线程
+        if (!schedulers.guardAuthoritative(() -> trySpectate(player))) {
+            return false;
+        }
         if (!isActive()) {
             // 结算中的那一 tick 也不放人进场，否则刚进来就会被清场
             alerts.sendTo(player, "spectator-unavailable", Map.of());
@@ -1759,7 +2201,7 @@ public final class GameEngine {
         spectatorGrace.put(player.getUniqueId(),
                 Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
         teams.joinSpectatorTeam(player.getUniqueId());
-        player.setGameMode(GameMode.SPECTATOR);
+        setGameMode(player, GameMode.SPECTATOR);
         scoreboard.attach(player, config.settings());
         teleport(player, config.settings().location("arena-spawn"));
         alerts.sendTo(player, "spectator-enter", Map.of());
@@ -1773,6 +2215,10 @@ public final class GameEngine {
      * 并登记“下次上线送回大厅”，而不是靠队伍状态去猜。</p>
      */
     public void onQuit(Player player) {
+        // 掉线事件在 Folia 上未必跑在权威线程，而这里要增删 members/queue/pendingHall
+        if (!schedulers.guardAuthoritative(() -> onQuit(player))) {
+            return;
+        }
         UUID uuid = player.getUniqueId();
         boolean retiredFromGame = false;
 
@@ -1820,6 +2266,10 @@ public final class GameEngine {
 
     /** 玩家上线。 */
     public void onJoin(Player player) {
+        // 上线事件在 Folia 上未必跑在权威线程，而这里要增删 members/disconnectedSpectators/pendingHall
+        if (!schedulers.guardAuthoritative(() -> onJoin(player))) {
+            return;
+        }
         UUID uuid = player.getUniqueId();
 
         // 需求 104：对局中掉线的观战者重新上线，仍为观战模式、仍在队伍 fmgz。
@@ -1829,11 +2279,11 @@ public final class GameEngine {
             pendingHall.remove(uuid);
             if (phase == GamePhase.RUNNING) {
                 spectatorGrace.put(uuid, Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
-                player.setGameMode(GameMode.SPECTATOR);
+                setGameMode(player, GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
             } else {
-                player.setGameMode(GameMode.SURVIVAL);
+                setGameMode(player, GameMode.SURVIVAL);
                 teams.leaveAll(uuid);
                 scoreboard.detach(player);
                 teleport(player, config.settings().location("hall-spawn"));
@@ -1844,7 +2294,7 @@ public final class GameEngine {
         // 需求 108 / 39：对局中掉线的参战者、准备房间内掉线的入队玩家——
         // 无论对局是否已结束，上线一律移出队伍、恢复生存模式并传送至大厅
         if (pendingHall.remove(uuid)) {
-            player.setGameMode(GameMode.SURVIVAL);
+            setGameMode(player, GameMode.SURVIVAL);
             teams.leaveAll(uuid);
             scoreboard.detach(player);
             teleport(player, config.settings().location("hall-spawn"));
@@ -1857,14 +2307,14 @@ public final class GameEngine {
                 // 名单里仍有此人（例如跨 tick 的边界情况）：按观战处理，不再回到对局
                 spectatorGrace.put(uuid, Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
                 teams.joinSpectatorTeam(uuid);
-                player.setGameMode(GameMode.SPECTATOR);
+                setGameMode(player, GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
                 return;
             }
             if (teams.inSpectatorTeam(uuid)) {
                 spectatorGrace.put(uuid, Bukkit.getCurrentTick() + SPECTATOR_GRACE_TICKS);
-                player.setGameMode(GameMode.SPECTATOR);
+                setGameMode(player, GameMode.SPECTATOR);
                 scoreboard.attach(player, config.settings());
                 teleport(player, config.settings().location("arena-spawn"));
                 return;
@@ -1874,7 +2324,7 @@ public final class GameEngine {
             // 对局已结束或已离开：清干净并送回大厅
             teams.leaveAll(uuid);
             scoreboard.detach(player);
-            player.setGameMode(GameMode.SURVIVAL);
+            setGameMode(player, GameMode.SURVIVAL);
             teleport(player, config.settings().location("hall-spawn"));
         }
     }
@@ -1918,7 +2368,7 @@ public final class GameEngine {
         if (phase != GamePhase.RUNNING || ended) {
             return;
         }
-        Bukkit.getScheduler().runTask(plugin, () -> {
+        schedulers.onMain(() -> {
             // ended 标志保证同一局只结算一次：否则“宣布胜利 → 淘汰胜利者”会再触发一次
             // “无人生还”，同一局出现两条矛盾提示
             if (phase != GamePhase.RUNNING || ended) {
@@ -1957,6 +2407,12 @@ public final class GameEngine {
      * @return 是否确实处理了这次死亡（不在名单里的玩家返回 false）
      */
     public boolean onPlayerDeath(Player player) {
+        // 死亡事件在 Folia 上跑在该玩家所属区域线程（受害者自己所在的区域），
+        // 而淘汰流程要改 members/待重生名单/队伍/积分：整段交给权威线程。
+        // 事件里对掉落与经验的处理（setDrops/setKeepLevel）仍留在监听器里同步完成。
+        if (!schedulers.guardAuthoritative(() -> onPlayerDeath(player))) {
+            return false;
+        }
         if (phase != GamePhase.RUNNING || ended || !members.contains(player.getUniqueId())) {
             return false;
         }
@@ -1978,6 +2434,9 @@ public final class GameEngine {
      * 而不是像 {@link #stop()} 那样静默强清（后者只用于插件停用的兜底）。
      */
     public void requestEnd() {
+        if (!schedulers.guardAuthoritative(this::requestEnd)) {
+            return;
+        }
         if (phase == GamePhase.IDLE || phase == GamePhase.ENDING) {
             return;
         }
@@ -2009,7 +2468,7 @@ public final class GameEngine {
         for (Player player : onlineSpectators()) {
             teams.leaveAll(player.getUniqueId());
             scoreboard.detach(player);
-            player.setGameMode(GameMode.SURVIVAL);
+            setGameMode(player, GameMode.SURVIVAL);
             teleport(player, settings.location("hall-spawn"));
         }
         // --- 玩家侧收尾：以下必须在任何区块批量操作之前 ---
@@ -2036,7 +2495,7 @@ public final class GameEngine {
         for (Player player : onlineSpectators()) {
             teams.leaveAll(player.getUniqueId());
             scoreboard.detach(player);
-            player.setGameMode(GameMode.SURVIVAL);
+            setGameMode(player, GameMode.SURVIVAL);
             teleport(player, config.settings().location("hall-spawn"));
         }
         // 与 finishGame 同一个原则：先把玩家送走，再做环境清理
@@ -2064,7 +2523,7 @@ public final class GameEngine {
                 continue;
             }
             pendingHall.remove(uuid);
-            player.setGameMode(GameMode.SURVIVAL);
+            setGameMode(player, GameMode.SURVIVAL);
             teams.leaveAll(uuid);
             scoreboard.detach(player);
             teleport(player, config.settings().locationOrNull("hall-spawn"));
@@ -2131,6 +2590,9 @@ public final class GameEngine {
 
     /** 强制中止（/fmwar stop）。 */
     public void stop() {
+        if (!schedulers.guardAuthoritative(this::forceCleanup)) {
+            return;
+        }
         forceCleanup();
     }
 
@@ -2159,6 +2621,12 @@ public final class GameEngine {
      * <p>领地插件通常在 PlayerTeleportEvent 里取消事件来拦人，这种情况下
      * {@link Player#teleportAsync(Location)} 的 future 会完成为 {@code false}；
      * 调用方据此决定是否需要回滚副作用（例如把刚入队的玩家踢出队列）。</p>
+     *
+     * <p><b>调用前提：必须在权威线程上调用。</b>它内部要经
+     * {@link ResidenceService#runWithAccess} 下发 {@code /res set} 指令，而指令派发只能在
+     * 权威线程。之所以不像 {@link #teleport(Player, Location)} 那样自带守卫，
+     * 是因为这里必须把<b>真实</b>的 future 交回调用方——重排之后就没法再返回它了。
+     * 目前的唯一调用方 {@link #tryJoinQueue} 已经在入口处被守卫，前提成立。</p>
      */
     public CompletableFuture<Boolean> teleportAsyncWithResult(Player player, Location location) {
         if (location == null) {
@@ -2190,6 +2658,11 @@ public final class GameEngine {
      * 玩家无法自行传进去；只有本插件把人送进去的那一瞬间是开的。</p>
      */
     public void teleport(Player player, Location location) {
+        // 传送前要下发领地指令（必须是权威线程），因此这里也做一次守卫：
+        // 从玩家自身线程（例如重生流程）发起的传送会被重排回权威线程再执行。
+        if (!schedulers.guardAuthoritative(() -> teleport(player, location))) {
+            return;
+        }
         if (location == null) {
             plugin.getLogger().warning("传送目标世界未加载，玩家 " + player.getName() + " 未被传送");
             return;

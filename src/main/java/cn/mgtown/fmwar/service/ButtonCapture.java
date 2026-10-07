@@ -7,7 +7,6 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -26,10 +25,15 @@ public final class ButtonCapture {
     private final ConfigService config;
     private final AlertService alerts;
 
-    /** 玩家 -> 待绑定的按钮键。 */
-    private final Map<UUID, String> pendingKey = new HashMap<>();
-    /** 玩家 -> 本次等待的截止 tick，超时自动作废。 */
-    private final Map<UUID, Long> pendingUntil = new HashMap<>();
+    /**
+     * 玩家 -> 待绑定的按钮键。
+     *
+     * <p>用并发表：写入来自指令线程（{@code /fmwar button <键>}），读取与移除来自右键事件
+     * ——Folia 上后者跑在该玩家所属区域线程，两者不是同一个线程。</p>
+     */
+    private final Map<UUID, String> pendingKey = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 玩家 -> 本次等待的截止 tick，超时自动作废。理由同 {@link #pendingKey}。 */
+    private final Map<UUID, Long> pendingUntil = new java.util.concurrent.ConcurrentHashMap<>();
 
     public ButtonCapture(ConfigService config, AlertService alerts) {
         this.config = config;
@@ -112,13 +116,14 @@ public final class ButtonCapture {
      * 与配置键必须完全一致，点一下比手打可靠。</p>
      */
     public void suggestKeys(Player player) {
-        player.sendMessage(LEGACY.deserialize(config.settings().message("button-capture-choose")));
+        // 统一经 AlertService 下发：消息属于玩家自身状态，Folia 上要在该玩家所属线程发
+        alerts.sendChat(player, config.settings().message("button-capture-choose"));
         for (Spec.Button button : config.settings().buttons().values()) {
             String key = button.key();
             Component line = LEGACY.deserialize("&e - &f" + key + " &7(" + describe(button) + ")")
                     .clickEvent(ClickEvent.runCommand("/fmwar button " + key))
                     .hoverEvent(Component.text("点击后右键一次目标方块即可绑定到 " + key));
-            player.sendMessage(line);
+            alerts.sendComponent(player, line);
         }
     }
 

@@ -1,6 +1,7 @@
 package cn.mgtown.fmwar.service;
 
 import cn.mgtown.fmwar.config.Settings;
+import cn.mgtown.fmwar.util.Schedulers;
 import io.papermc.paper.scoreboard.numbers.NumberFormat;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
@@ -34,6 +35,12 @@ import java.util.UUID;
  *
  * <p>积分榜**不显示在侧栏**：它只在 {@code /fmwar points list} 里查看，因此本类
  * 不注册 fmjfb 目标，也不会占用玩家的侧栏。</p>
+ *
+ * <p><b>线程归属</b>：侧栏与 BossBar 都是“发给某个玩家看”的东西，在 Folia 上必须在
+ * <b>该玩家所属的区域线程</b>下发；{@code player.showBossBar} / {@code hideBossBar}
+ * 一律经 {@link Schedulers#runOwned}。而维护“谁正在看这条 Bar”的
+ * {@code countdownViewers} 只由插件权威线程读写（本类全部调用点都在权威线程），
+ * 因此刻意保持普通 {@link HashSet}。</p>
  */
 public final class GameScoreboard {
 
@@ -61,6 +68,7 @@ public final class GameScoreboard {
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacyAmpersand();
 
     private final TeamService teams;
+    private final Schedulers schedulers;
 
     /**
      * 准备阶段的常驻显示条（BossBar）。
@@ -91,8 +99,9 @@ public final class GameScoreboard {
     private static final String COUNTDOWN_ENTRY = "fmcd.time";
     private Objective countdownObjective;
 
-    public GameScoreboard(TeamService teams) {
+    public GameScoreboard(TeamService teams, Schedulers schedulers) {
         this.teams = teams;
+        this.schedulers = schedulers;
     }
 
     /** 为一名玩家准备记分板并挂上。 */
@@ -113,7 +122,7 @@ public final class GameScoreboard {
         }
         // 准备倒计时用 BossBar 常驻显示（记分板不占用额外行）
         if (countdownActive) {
-            player.showBossBar(bossBar);
+            showBar(player);
             countdownViewers.add(player.getUniqueId());
         }
         teams.applyScoreboard(player, true);
@@ -122,8 +131,29 @@ public final class GameScoreboard {
     /** 把一名玩家的 BossBar 收起来（离场/观战结束时调用）。 */
     public void detachBossBar(Player player) {
         if (countdownViewers.remove(player.getUniqueId())) {
-            player.hideBossBar(bossBar);
+            hideBar(player);
         }
+    }
+
+    /**
+     * 在该玩家所属线程下发“显示本插件的准备显示条”。
+     *
+     * <p>BossBar 是发给具体玩家看的，Folia 上必须落在该玩家所属的区域线程；
+     * Paper 上就地执行，与改造前一致。</p>
+     */
+    private void showBar(Player player) {
+        if (player == null) {
+            return;
+        }
+        schedulers.runOwned(player, () -> player.showBossBar(bossBar), null);
+    }
+
+    /** 在该玩家所属线程下发“收起本插件的准备显示条”。 */
+    private void hideBar(Player player) {
+        if (player == null) {
+            return;
+        }
+        schedulers.runOwned(player, () -> player.hideBossBar(bossBar), null);
     }
 
     /**
@@ -179,20 +209,14 @@ public final class GameScoreboard {
             if (wanted.contains(uuid)) {
                 continue;
             }
-            Player player = Bukkit.getPlayer(uuid);
-            if (player != null) {
-                player.hideBossBar(bossBar);
-            }
+            hideBar(Bukkit.getPlayer(uuid));
             countdownViewers.remove(uuid);
         }
         for (UUID uuid : wanted) {
             if (!countdownViewers.add(uuid)) {
                 continue;
             }
-            Player player = Bukkit.getPlayer(uuid);
-            if (player != null) {
-                player.showBossBar(bossBar);
-            }
+            showBar(Bukkit.getPlayer(uuid));
         }
     }
 
@@ -202,10 +226,7 @@ public final class GameScoreboard {
         if (countdownActive || !countdownViewers.isEmpty()) {
             countdownActive = false;
             for (UUID uuid : new HashSet<>(countdownViewers)) {
-                Player player = Bukkit.getPlayer(uuid);
-                if (player != null) {
-                    player.hideBossBar(bossBar);
-                }
+                hideBar(Bukkit.getPlayer(uuid));
             }
             countdownViewers.clear();
         }
